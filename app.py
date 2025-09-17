@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
+
 import os
 
 # ---------- Load Data ----------
@@ -100,9 +102,33 @@ if menu == "Look up by code":
             st.download_button("📥 Download least similar results", df_bottom.to_csv(index=False).encode("utf-8"),
                                file_name=f"{code}_least_similar.csv")
 
-            # Histogram of similarity distribution
-            st.subheader("Similarity Score Distribution")
-            st.bar_chart(all_scores)
+# Histogram of similarity distribution
+st.subheader("Similarity Score Distribution")
+
+hist_df = pd.DataFrame({"score": all_scores.values})
+
+# Base histogram
+hist_chart = (
+    alt.Chart(hist_df)
+    .mark_bar(opacity=0.7, color="steelblue")
+    .encode(
+        alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
+        alt.Y("count()", title="Number of Occupations"),
+        tooltip=["count()"]
+    )
+    .properties(width=600, height=400)
+)
+
+# Add vertical line if user has a focal score (e.g., from compare_two_jobs or top lookup)
+if "score" in locals() and score is not None:
+    line = (
+        alt.Chart(pd.DataFrame({"score": [score]}))
+        .mark_rule(color="red", strokeWidth=2)
+        .encode(x="score:Q")
+    )
+    hist_chart = hist_chart + line
+
+st.altair_chart(hist_chart, use_container_width=True)
 
         else:
             st.error("❌ Invalid occupation code.")
