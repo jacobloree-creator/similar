@@ -114,3 +114,32 @@ elif menu == "Look up by title":
             st.subheader(f"Least Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
             st.dataframe(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"]))
 
+elif menu == "Compare two jobs":
+    job1 = st.text_input("Enter first occupation code or title:")
+    job2 = st.text_input("Enter second occupation code or title:")
+
+    if st.button("Compare"):
+        # Resolve titles → codes
+        if not job1.isdigit():
+            matches = find_code_from_title(job1)
+            job1 = matches[0] if matches else None
+        if not job2.isdigit():
+            matches = find_code_from_title(job2)
+            job2 = matches[0] if matches else None
+
+        if not job1 or not job2:
+            st.error("❌ One or both occupations not found.")
+        else:
+            result = compare_two_jobs(job1, job2)
+            if result:
+                score, rank, total = result
+                st.success(
+                    f"**Comparison Result:**\n\n"
+                    f"- {job1} ({code_to_title.get(job1,'Unknown')}) "
+                    f"vs {job2} ({code_to_title.get(job2,'Unknown')})\n"
+                    f"- Similarity score: `{score:.4f}`\n"
+                    f"- Ranking: `{rank}` out of `{total}` occupations "
+                    f"(#{rank} most similar to {job1})"
+                )
+            else:
+                st.error("❌ Could not compare occupations.")
