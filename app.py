@@ -79,13 +79,17 @@ st.set_page_config(page_title="Occupation Similarity App", layout="centered")
 
 st.title("🔍 Occupation Similarity App")
 
+# User can set number of results
+n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
+
 menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
 
 if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
         if code in similarity_df.index:
-            top_results, bottom_results = get_most_and_least_similar(code)
+            top_results, bottom_results = get_most_and_least_similar(code, n=n_results)
+
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             st.dataframe(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"]))
 
@@ -102,35 +106,11 @@ elif menu == "Look up by title":
             st.error("❌ No matches found.")
         else:
             selected_code = st.selectbox("Select a matching occupation:", matches, format_func=lambda c: f"{c} - {code_to_title[c]}")
-            top_results, bottom_results = get_most_and_least_similar(selected_code)
+            top_results, bottom_results = get_most_and_least_similar(selected_code, n=n_results)
+
             st.subheader(f"Most Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
             st.dataframe(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"]))
 
             st.subheader(f"Least Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
             st.dataframe(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"]))
 
-elif menu == "Compare two jobs":
-    job1 = st.text_input("Enter first occupation code or title:")
-    job2 = st.text_input("Enter second occupation code or title:")
-
-    if st.button("Compare"):
-        # Resolve titles → codes
-        if not job1.isdigit():
-            matches = find_code_from_title(job1)
-            job1 = matches[0] if matches else None
-        if not job2.isdigit():
-            matches = find_code_from_title(job2)
-            job2 = matches[0] if matches else None
-
-        if not job1 or not job2:
-            st.error("❌ One or both occupations not found.")
-        else:
-            result = compare_two_jobs(job1, job2)
-            if result:
-                score, rank, total = result
-                st.success(f"**Comparison Result:**\n\n"
-                           f"- {job1} ({code_to_title.get(job1,'Unknown')}) vs {job2} ({code_to_title.get(job2,'Unknown')})\n"
-                           f"- Similarity score: `{score:.4f}`\n"
-                           f"- Ranking: `{rank}` out of `{total}` occupations (# {rank} most similar)")
-            else:
-                st.error("❌ Could not compare occupations.")
