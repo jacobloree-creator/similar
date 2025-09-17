@@ -25,28 +25,43 @@ similarity_df, code_to_title, title_to_code = load_data()
 
 # ---------- Helper Functions ----------
 def find_code_from_title(title_input):
+    """
+    Return a list of occupation codes where the input matches part of the title.
+    Only returns codes that exist in the similarity matrix.
+    """
     title_input = title_input.lower().strip()
-    matches = [code for code, title in code_to_title.items() if title_input in title.lower().split()]
-    return matches
+    matches = [code for code, title in code_to_title.items() 
+               if title_input in title.lower()]
+    # Keep only codes that exist in the similarity matrix
+    valid_matches = [c for c in matches if c in similarity_df.index]
+    return valid_matches
 
 def get_most_and_least_similar(code, n=5):
+    """
+    Returns top N most similar, bottom N least similar, and full score Series.
+    """
     if code not in similarity_df.index:
         return None, None, None
-    scores = similarity_df.loc[code].drop(code)
+    scores = similarity_df.loc[code].drop(code).dropna()
 
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
 
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()]
+    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
+                   for occ, score in top_matches.items()]
+    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
+                      for occ, score in bottom_matches.items()]
 
     return top_results, bottom_results, scores
 
 def compare_two_jobs(code1, code2):
+    """
+    Returns similarity score and ranking position of code2 in code1’s similarity list.
+    """
     if code1 not in similarity_df.index or code2 not in similarity_df.index:
         return None
 
-    scores = similarity_df.loc[code1].drop(code1).sort_values()
+    scores = similarity_df.loc[code1].drop(code1).dropna().sort_values()
     if code2 not in scores.index:
         return None
 
@@ -82,6 +97,7 @@ with st.expander("ℹ️ About the app"):
 if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
+        code = str(code).strip()
         if code in similarity_df.index:
             top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
 
@@ -171,10 +187,10 @@ elif menu == "Compare two jobs":
 
     if st.button("Compare"):
         # Resolve titles → codes
-        if not job1.isdigit():
+        if job1 and not job1.isdigit():
             matches = find_code_from_title(job1)
             job1 = matches[0] if matches else None
-        if not job2.isdigit():
+        if job2 and not job2.isdigit():
             matches = find_code_from_title(job2)
             job2 = matches[0] if matches else None
 
@@ -193,10 +209,11 @@ elif menu == "Compare two jobs":
                     f"(#{rank} most similar to {job1})"
                 )
 
+
                 # Histogram with vertical marker
                 st.subheader(f"Similarity Score Distribution for {job1} – {code_to_title.get(job1,'Unknown')}")
                 st.write("Graph shows the distribution of similarity scores for {job1}. The red line indicates where thescore with {job2} lies.")
-                hist_df = pd.DataFrame({"score": similarity_df.loc[job1].drop(job1).values})
+                hist_df = pd.DataFrame({"score": similarity_df.loc[job1].drop(job1).dropna().values})
                 hist_chart = (
                     alt.Chart(hist_df)
                     .mark_bar(opacity=0.7, color="steelblue")
