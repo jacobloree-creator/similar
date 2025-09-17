@@ -73,8 +73,9 @@ menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by tit
 # About section
 with st.expander("ℹ️ About the app"):
     st.write("""
-    Placeholder text – you can describe here what the similarity scores mean,
-    where the data comes from, and how to use the tool.
+    Similarity scores come from Euclidian distance measures of ONET skills, abilities, and knowledge required to perform
+    a specific job. Each score measures the total distance between each occupation pair combo. Smaller numbers mean more similar.
+    Data comes from the 2025 release.
     """)
 
 # ---- Look up by code ----
@@ -101,7 +102,8 @@ if menu == "Look up by code":
                                file_name=f"{code}_least_similar.csv")
 
             # Similarity distribution
-            st.subheader("Similarity Score Distribution")
+            st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
+            st.write("Graph shows the distribution of similarity scores for {job1}.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -114,6 +116,7 @@ if menu == "Look up by code":
                 .properties(width=600, height=400)
             )
             st.altair_chart(hist_chart, use_container_width=True)
+
         else:
             st.error("❌ Invalid occupation code.")
 
@@ -146,7 +149,8 @@ elif menu == "Look up by title":
                                file_name=f"{selected_code}_least_similar.csv")
 
             # Similarity distribution
-            st.subheader("Similarity Score Distribution")
+            st.subheader(f"Similarity Score Distribution for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
+            st.write("Graph shows the distribution of similarity scores for {job1}.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -189,12 +193,9 @@ elif menu == "Compare two jobs":
                     f"(#{rank} most similar to {job1})"
                 )
 
-                # Ranking position progress bar
-                st.subheader("Ranking Position Visualization")
-                st.progress(rank / total)
-
-                # Add vertical marker line on histogram for this score
-                st.subheader("Similarity Score Distribution")
+                # Histogram with vertical marker
+                st.subheader(f"Similarity Score Distribution for {job1} – {code_to_title.get(job1,'Unknown')}")
+                st.write("Graph shows the distribution of similarity scores for {job1}. The red line indicates where thescore with {job2} lies.")
                 hist_df = pd.DataFrame({"score": similarity_df.loc[job1].drop(job1).values})
                 hist_chart = (
                     alt.Chart(hist_df)
@@ -215,4 +216,3 @@ elif menu == "Compare two jobs":
 
             else:
                 st.error("❌ Could not compare occupations.")
-
