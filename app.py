@@ -8,14 +8,17 @@ import altair as alt
 def load_data():
     base_path = os.path.dirname(__file__)
 
+    # Load similarity matrix
     similarity_df = pd.read_excel(os.path.join(base_path, "similarity matrix.xlsx"), index_col=0)
-    similarity_df.index = similarity_df.index.astype(str).str.strip()
-    similarity_df.columns = similarity_df.columns.astype(str).str.strip()
+    similarity_df.index = similarity_df.index.astype(str).str.zfill(5).str.strip()
+    similarity_df.columns = similarity_df.columns.astype(str).str.zfill(5).str.strip()
 
+    # Load NOC titles
     titles_df = pd.read_excel(os.path.join(base_path, "noc title.xlsx"))
     titles_df.columns = titles_df.columns.str.strip().str.lower()
-    titles_df["noc"] = titles_df["noc"].astype(str).str.strip()
+    titles_df["noc"] = titles_df["noc"].astype(str).str.zfill(5).str.strip()
 
+    # Create mappings
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
 
@@ -30,8 +33,7 @@ def find_code_from_title(title_input):
     Only returns codes that exist in the similarity matrix.
     """
     title_input = title_input.lower().strip()
-    matches = [code for code, title in code_to_title.items() 
-               if title_input in title.lower()]
+    matches = [code for code, title in code_to_title.items() if title_input in title.lower()]
     # Keep only codes that exist in the similarity matrix
     valid_matches = [c for c in matches if c in similarity_df.index]
     return valid_matches
@@ -97,7 +99,7 @@ with st.expander("ℹ️ About the app"):
 if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
-        code = str(code).strip()
+        code = str(code).zfill(5).strip()
         if code in similarity_df.index:
             top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
 
@@ -119,7 +121,7 @@ if menu == "Look up by code":
 
             # Similarity distribution
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
-            st.write("Graph shows the distribution of similarity scores for {job1}.")
+            st.write("Placeholder text: Explain here how to interpret this histogram for the selected occupation.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -166,7 +168,7 @@ elif menu == "Look up by title":
 
             # Similarity distribution
             st.subheader(f"Similarity Score Distribution for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
-            st.write("Graph shows the distribution of similarity scores for {job1}.")
+            st.write("Placeholder text: Explain here how to interpret this histogram for the selected occupation.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -209,10 +211,14 @@ elif menu == "Compare two jobs":
                     f"(#{rank} most similar to {job1})"
                 )
 
+                # Ranking progress bar
+                st.subheader("Ranking Position Visualization")
+                st.write("Placeholder text: Explain how to interpret this progress bar relative to all occupations.")
+                st.progress(rank / total)
 
                 # Histogram with vertical marker
                 st.subheader(f"Similarity Score Distribution for {job1} – {code_to_title.get(job1,'Unknown')}")
-                st.write("Graph shows the distribution of similarity scores for {job1}. The red line indicates where thescore with {job2} lies.")
+                st.write("Placeholder text: Explain how to interpret the vertical red line for this comparison in the histogram.")
                 hist_df = pd.DataFrame({"score": similarity_df.loc[job1].drop(job1).dropna().values})
                 hist_chart = (
                     alt.Chart(hist_df)
