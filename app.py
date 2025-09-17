@@ -29,13 +29,20 @@ def find_code_from_title(title_input):
     matches = [code for code, title in code_to_title.items() if title_input in title.lower()]
     return matches
 
-def get_top_similar(code, n=5):
+# ---------- Helper Functions ----------
+def get_most_and_least_similar(code, n=5):
+    """Return both the n most similar (smallest scores) and n least similar (largest scores)."""
     if code not in similarity_df.index:
-        return None
+        return None, None
     scores = similarity_df.loc[code].drop(code)
+    
     top_matches = scores.nsmallest(n)
-    results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
-    return results
+    bottom_matches = scores.nlargest(n)
+
+    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
+    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()]
+
+    return top_results, bottom_results
 
 def compare_two_jobs(code1, code2):
     """Return similarity score and ranking position of code2 in code1’s similarity list."""
@@ -78,9 +85,12 @@ if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
         if code in similarity_df.index:
-            results = get_top_similar(code)
-            st.subheader(f"Top Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            st.dataframe(pd.DataFrame(results, columns=["Code", "Title", "Similarity Score"]))
+            top_results, bottom_results = get_most_and_least_similar(code)
+            st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
+            st.dataframe(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"]))
+
+            st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
+            st.dataframe(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"]))
         else:
             st.error("❌ Invalid occupation code.")
 
@@ -92,9 +102,12 @@ elif menu == "Look up by title":
             st.error("❌ No matches found.")
         else:
             selected_code = st.selectbox("Select a matching occupation:", matches, format_func=lambda c: f"{c} - {code_to_title[c]}")
-            results = get_top_similar(selected_code)
-            st.subheader(f"Top Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
-            st.dataframe(pd.DataFrame(results, columns=["Code", "Title", "Similarity Score"]))
+            top_results, bottom_results = get_most_and_least_similar(selected_code)
+            st.subheader(f"Most Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
+            st.dataframe(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"]))
+
+            st.subheader(f"Least Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
+            st.dataframe(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"]))
 
 elif menu == "Compare two jobs":
     job1 = st.text_input("Enter first occupation code or title:")
