@@ -26,7 +26,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --add-data "similarity matrix.xlsx;." --add-data "noc title.xlsx;." similar.py
+          pyinstaller --onefile --add-data "similarity matrix.xlsx;." --add-data "noc title.xlsx;." similar_adv.py
           echo "Listing dist folder:"
           dir dist
 
