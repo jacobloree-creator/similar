@@ -38,13 +38,33 @@ def get_top_similar(code, n=5):
     return results
 
 def compare_two_jobs(code1, code2):
+    """Return similarity score and ranking position of code2 in code1’s similarity list."""
+    # Ensure both codes are present
     if code1 not in similarity_df.index or code2 not in similarity_df.index:
         return None
+
+    # Get scores for code1
     scores = similarity_df.loc[code1].drop(code1).sort_values()
-    rank = scores.index.get_loc(code2) + 1
-    total = len(scores)
+
+    # Compute rank safely
+    if code2 not in scores.index:
+        return None
+    try:
+        rank = scores.index.get_loc(code2) + 1  # 1-based rank
+    except KeyError:
+        rank = None
+
+    # Lookup similarity score, checking both directions
     score = similarity_df.loc[code1, code2]
+    if pd.isna(score):  # try reverse
+        score = similarity_df.loc[code2, code1]
+
+    if pd.isna(score):
+        return None  # no valid similarity
+
+    total = len(scores)
     return score, rank, total
+
 
 
 # ---------- Streamlit App ----------
