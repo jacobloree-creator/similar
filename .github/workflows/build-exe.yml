@@ -26,7 +26,8 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile app.py
+          pyinstaller --onefile --add-data "similarity matrix.xlsx;." --add-data "noc title.xlsx;." similar.py
+          echo "Listing dist folder:"
           dir dist
 
       - name: Upload EXE as artifact
