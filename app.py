@@ -25,8 +25,8 @@ similarity_df, code_to_title, title_to_code = load_data()
 
 # ---------- Helper Functions ----------
 def find_code_from_title(title_input):
-    title_input = title_input.lower()
-    matches = [code for code, title in code_to_title.items() if title_input in title.lower()]
+    title_input = title_input.lower().strip()
+    matches = [code for code, title in code_to_title.items() if title_input in title.lower().split()]
     return matches
 
 def get_most_and_least_similar(code, n=5):
