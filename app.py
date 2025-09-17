@@ -86,21 +86,11 @@ if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
         if code in similarity_df.index:
-            top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
-
-            st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            st.dataframe(df_top)
-
-            st.download_button("📥 Download most similar results", df_top.to_csv(index=False).encode("utf-8"),
-                               file_name=f"{code}_most_similar.csv")
-
-            st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            st.dataframe(df_bottom)
-
-            st.download_button("📥 Download least similar results", df_bottom.to_csv(index=False).encode("utf-8"),
-                               file_name=f"{code}_least_similar.csv")
+            results = get_top_similar(code)
+            st.subheader(f"Top Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
+            st.dataframe(pd.DataFrame(results, columns=["Code", "Title", "Similarity Score"]))
+        else:
+            st.error("❌ Invalid occupation code.")
 
 # Histogram of similarity distribution
 st.subheader("Similarity Score Distribution")
@@ -129,9 +119,6 @@ if "score" in locals() and score is not None:
     hist_chart = hist_chart + line
 
 st.altair_chart(hist_chart, use_container_width=True)
-
-        else:
-            st.error("❌ Invalid occupation code.")
 
 # ---- Look up by title ----
 elif menu == "Look up by title":
