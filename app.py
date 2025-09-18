@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import os
 import altair as alt
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -35,8 +33,10 @@ def get_most_and_least_similar(code, n=5):
     scores = similarity_df.loc[code].drop(code).dropna()
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()]
+    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
+                   for occ, score in top_matches.items()]
+    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
+                      for occ, score in bottom_matches.items()]
     return top_results, bottom_results, scores
 
 def compare_two_jobs(code1, code2):
@@ -60,11 +60,10 @@ st.title("🔍 Occupation Similarity App")
 
 # Sidebar
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs", "Heatmap", "About the app"])
+menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
 
 # About section
-if menu == "About the app":
-    st.header("ℹ️ About the App")
+with st.expander("ℹ️ About the app"):
     st.write("""
     Similarity scores come from Euclidian distance measures of ONET skills, abilities, and knowledge required to perform
     a specific job. Each score measures the total distance between each occupation pair combo. Smaller numbers mean more similar.
@@ -72,7 +71,7 @@ if menu == "About the app":
     """)
 
 # ---- Look up by code ----
-elif menu == "Look up by code":
+if menu == "Look up by code":
     code = st.text_input("Enter 5-digit occupation code:")
     if code:
         code = str(code).zfill(5).strip()
@@ -83,15 +82,20 @@ elif menu == "Look up by code":
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
             st.dataframe(df_top)
+            st.download_button("📥 Download most similar results",
+                               df_top.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{code}_most_similar.csv")
 
             # Least similar
             st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
             st.dataframe(df_bottom)
+            st.download_button("📥 Download least similar results",
+                               df_bottom.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{code}_least_similar.csv")
 
             # Histogram
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
-            st.write("Placeholder: Explain here how to interpret this histogram for the selected occupation.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -109,39 +113,53 @@ elif menu == "Look up by code":
 
 # ---- Look up by title ----
 elif menu == "Look up by title":
+    # Get all codes that have similarity scores
     available_codes = [code for code in code_to_title if code in similarity_df.index]
-    title_options = [f"{code} – {code_to_title[code]}" for code in available_codes]
-    selected_item = st.selectbox("Select an occupation:", sorted(title_options))
-    selected_code = selected_item.split(" – ")[0]
-    selected_title = selected_item.split(" – ")[1]
 
-    top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
+    # Prepare full title list
+    all_titles = [f"{code} – {code_to_title[code]}" for code in available_codes]
 
-    # Most similar
-    st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
-    df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-    st.dataframe(df_top)
+    # Searchable text input
+    search_input = st.text_input("Type occupation title (or part of it) to search:")
+    if search_input:
+        # Filter titles containing the search string (case-insensitive)
+        filtered_titles = [t for t in all_titles if search_input.lower() in t.lower()]
+        if not filtered_titles:
+            st.warning("No matching occupations found.")
+        else:
+            selected_item = st.selectbox("Select an occupation:", filtered_titles)
+    else:
+        # Default dropdown if no search input
+        selected_item = st.selectbox("Select an occupation:", all_titles)
 
-    # Least similar
-    st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
-    df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-    st.dataframe(df_bottom)
+    if selected_item:
+        selected_code, selected_title = selected_item.split(" – ")
+        top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
 
-    # Histogram
-    st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
-    st.write("Placeholder: Explain here how to interpret this histogram for the selected occupation.")
-    hist_df = pd.DataFrame({"score": all_scores.values})
-    hist_chart = (
-        alt.Chart(hist_df)
-        .mark_bar(opacity=0.7, color="steelblue")
-        .encode(
-            alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
-            alt.Y("count()", title="Number of Occupations"),
-            tooltip=["count()"]
+        # Most similar
+        st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
+        df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
+        st.dataframe(df_top)
+
+        # Least similar
+        st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
+        df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
+        st.dataframe(df_bottom)
+
+        # Histogram
+        st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
+        hist_df = pd.DataFrame({"score": all_scores.values})
+        hist_chart = (
+            alt.Chart(hist_df)
+            .mark_bar(opacity=0.7, color="steelblue")
+            .encode(
+                alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
+                alt.Y("count()", title="Number of Occupations"),
+                tooltip=["count()"]
+            )
+            .properties(width=600, height=400)
         )
-        .properties(width=600, height=400)
-    )
-    st.altair_chart(hist_chart, use_container_width=True)
+        st.altair_chart(hist_chart, use_container_width=True)
 
 # ---- Compare two jobs ----
 elif menu == "Compare two jobs":
@@ -166,11 +184,30 @@ elif menu == "Compare two jobs":
                 f"(#{rank} most similar to {job1_code})"
             )
 
-# ---- Heatmap ----
-elif menu == "Heatmap":
-    st.subheader("Similarity Matrix Heatmap")
-    st.write("Cells show similarity scores between occupations (smaller = more similar). Rounded to 1 decimal place for readability.")
-    
-    fig, ax = plt.subplots(figsize=(12,10))
-    sns.heatmap(similarity_df.astype(float), cmap="viridis", annot=False, fmt=".1f", cbar_kws={'label': 'Similarity Score'})
-    st.pyplot(fig)
+            # Ranking progress bar
+            st.subheader("Ranking Position Visualization")
+            st.write("Filled bar indicates where match lies in rank.")
+            st.progress(rank / total)
+
+            # Histogram with marker
+            st.subheader(f"Similarity Score Distribution for {job1_code} – {job1_title}")
+            st.write("Placeholder text: Red line denotes where match lies in distribution.")
+            hist_df = pd.DataFrame({"score": similarity_df.loc[job1_code].drop(job1_code).dropna().values})
+            hist_chart = (
+                alt.Chart(hist_df)
+                .mark_bar(opacity=0.7, color="steelblue")
+                .encode(
+                    alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
+                    alt.Y("count()", title="Number of Occupations"),
+                    tooltip=["count()"]
+                )
+                .properties(width=600, height=400)
+            )
+            line = (
+                alt.Chart(pd.DataFrame({"score": [score]}))
+                .mark_rule(color="red", strokeWidth=2)
+                .encode(x="score:Q")
+            )
+            st.altair_chart(hist_chart + line, use_container_width=True)
+        else:
+            st.error("❌ Could not compare occupations.")
