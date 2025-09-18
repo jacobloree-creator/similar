@@ -12,7 +12,7 @@ import seaborn as sns
 def load_data():
     base_path = os.path.dirname(__file__)
 
-    similarity_df = pd.read_excel(os.path.join(base_path, "similarity matrix.xlsx"), index_col=0)
+    similarity_df = pd.read_excel(os.path.join(base_path, "similarity matrix_v2.xlsx"), index_col=0)
     similarity_df.index = similarity_df.index.astype(str).str.strip()
     similarity_df.columns = similarity_df.columns.astype(str).str.strip()
 
