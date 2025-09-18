@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 import os
 import altair as alt
+import networkx as nx
+from pyvis.network import Network
+import streamlit.components.v1 as components
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -96,7 +101,7 @@ if menu == "Look up by code":
 
             # Histogram
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
-            st.write("Placeholder text: Explain here how to interpret this histogram for the selected occupation.")
+            st.write("Placeholder: Explain histogram interpretation.")
             hist_df = pd.DataFrame({"score": all_scores.values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -109,28 +114,20 @@ if menu == "Look up by code":
                 .properties(width=600, height=400)
             )
             st.altair_chart(hist_chart, use_container_width=True)
-        else:
-            st.error("❌ Invalid occupation code.")
 
-# ---- Look up by title ----
+# ---- Look up by title with search ----
 elif menu == "Look up by title":
-    # Get all codes that have similarity scores
     available_codes = [code for code in code_to_title if code in similarity_df.index]
-
-    # Prepare full title list
     all_titles = [f"{code} – {code_to_title[code]}" for code in available_codes]
 
-    # Searchable text input
     search_input = st.text_input("Type occupation title (or part of it) to search:")
     if search_input:
-        # Filter titles containing the search string (case-insensitive)
         filtered_titles = [t for t in all_titles if search_input.lower() in t.lower()]
         if not filtered_titles:
             st.warning("No matching occupations found.")
         else:
             selected_item = st.selectbox("Select an occupation:", filtered_titles)
     else:
-        # Default dropdown if no search input
         selected_item = st.selectbox("Select an occupation:", all_titles)
 
     if selected_item:
@@ -141,15 +138,21 @@ elif menu == "Look up by title":
         st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
         df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
         st.dataframe(df_top)
+        st.download_button("📥 Download most similar results",
+                           df_top.to_csv(index=False).encode("utf-8"),
+                           file_name=f"{selected_code}_most_similar.csv")
 
         # Least similar
         st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
         df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
         st.dataframe(df_bottom)
+        st.download_button("📥 Download least similar results",
+                           df_bottom.to_csv(index=False).encode("utf-8"),
+                           file_name=f"{selected_code}_least_similar.csv")
 
         # Histogram
         st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
-        st.write("Placeholder text: Explain here how to interpret this histogram for the selected occupation.")
+        st.write("Placeholder: Explain histogram interpretation.")
         hist_df = pd.DataFrame({"score": all_scores.values})
         hist_chart = (
             alt.Chart(hist_df)
@@ -162,6 +165,34 @@ elif menu == "Look up by title":
             .properties(width=600, height=400)
         )
         st.altair_chart(hist_chart, use_container_width=True)
+
+        # ----- Heatmap -----
+        top_n = 20
+        top_codes = list(similarity_df.loc[selected_code].nsmallest(top_n).index) + [selected_code]
+        heatmap_df = similarity_df.loc[top_codes, top_codes]
+        st.subheader(f"Similarity Heatmap (Top {top_n}) for {selected_title}")
+        st.write("Placeholder: Darker color = more similar.")
+        fig, ax = plt.subplots(figsize=(10,8))
+        sns.heatmap(heatmap_df.astype(float), annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
+        st.pyplot(fig)
+
+        # ----- Network -----
+        st.subheader(f"Similarity Network (Top {top_n}) for {selected_title}")
+        st.write("Placeholder: Node size/color = similarity strength.")
+        G = nx.Graph()
+        for occ in top_codes:
+            G.add_node(occ, title=code_to_title.get(occ, "Unknown"))
+        for occ in top_codes:
+            for neighbor in top_codes:
+                if occ != neighbor:
+                    weight = similarity_df.loc[occ, neighbor]
+                    G.add_edge(occ, neighbor, weight=weight)
+        net = Network(height="500px", width="100%", notebook=False)
+        net.from_nx(G)
+        net.show_buttons(filter_=['physics'])
+        net_file = "temp_network.html"
+        net.save_graph(net_file)
+        components.html(open(net_file,'r', encoding='utf-8').read(), height=550)
 
 # ---- Compare two jobs ----
 elif menu == "Compare two jobs":
@@ -185,15 +216,13 @@ elif menu == "Compare two jobs":
                 f"- Ranking: `{rank}` out of `{total}` occupations "
                 f"(#{rank} most similar to {job1_code})"
             )
-
-            # Ranking progress bar
             st.subheader("Ranking Position Visualization")
-            st.write("Placeholder text: Explain how to interpret this progress bar relative to all occupations.")
-            st.progress(rank / total)
+            st.write("Placeholder: Interpretation of progress bar relative to all occupations.")
+            st.progress(rank/total)
 
-            # Histogram with marker
+            # Histogram with comparison marker
             st.subheader(f"Similarity Score Distribution for {job1_code} – {job1_title}")
-            st.write("Placeholder text: Explain how to interpret the vertical red line for this comparison in the histogram.")
+            st.write("Placeholder: Vertical red line marks similarity with selected occupation.")
             hist_df = pd.DataFrame({"score": similarity_df.loc[job1_code].drop(job1_code).dropna().values})
             hist_chart = (
                 alt.Chart(hist_df)
@@ -206,7 +235,7 @@ elif menu == "Compare two jobs":
                 .properties(width=600, height=400)
             )
             line = (
-                alt.Chart(pd.DataFrame({"score": [score]}))
+                alt.Chart(pd.DataFrame({"score":[score]}))
                 .mark_rule(color="red", strokeWidth=2)
                 .encode(x="score:Q")
             )
