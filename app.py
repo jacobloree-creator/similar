@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
-# Optional fuzzy search
-from difflib import get_close_matches  
+from difflib import get_close_matches  # for fuzzy title search
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -30,7 +29,7 @@ def find_code_from_title(title_input):
     title_input = title_input.lower()
     matches = [code for code, title in code_to_title.items() if title_input in title.lower()]
 
-    # If no direct substring matches, use fuzzy matching
+    # If no substring matches, use fuzzy matching
     if not matches:
         all_titles = list(code_to_title.values())
         close_matches = get_close_matches(title_input, all_titles, n=5, cutoff=0.6)
@@ -71,13 +70,7 @@ st.title("🔍 Occupation Similarity App")
 
 menu = st.sidebar.radio(
     "Choose an option:",
-    [
-        "Look up by code",
-        "Look up by title",
-        "Search & Explore",
-        "Compare two jobs",
-        "About the App",
-    ],
+    ["Look up by code", "Look up by title", "Compare two jobs", "About the App"],
 )
 
 # ---- Look up by code ----
@@ -111,18 +104,6 @@ elif menu == "Look up by title":
 
             st.subheader(f"Least Similar Occupations for {selected_code} – {code_to_title.get(selected_code,'Unknown')}")
             st.dataframe(pd.DataFrame(get_least_similar(selected_code), columns=["Code", "Title", "Similarity Score"]))
-
-# ---- Search & Explore ----
-elif menu == "Search & Explore":
-    all_options = [f"{c} - {t}" for c, t in code_to_title.items()]
-    selected = st.selectbox("Select an occupation:", all_options)
-    if selected:
-        code = selected.split(" - ")[0]
-        st.subheader(f"Top Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-        st.dataframe(pd.DataFrame(get_top_similar(code), columns=["Code", "Title", "Similarity Score"]))
-
-        st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-        st.dataframe(pd.DataFrame(get_least_similar(code), columns=["Code", "Title", "Similarity Score"]))
 
 # ---- Compare two jobs ----
 elif menu == "Compare two jobs":
