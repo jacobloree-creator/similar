@@ -1,4 +1,8 @@
-pandas
-openpyxl
-streamlit
-altair
+streamlit>=1.30
+pandas>=2.1
+altair>=5.0
+matplotlib>=3.7
+seaborn>=0.12
+networkx>=3.1
+pyvis>=0.3
+openpyxl>=3.1
