@@ -1,11 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
-import networkx as nx
-import matplotlib.pyplot as plt
-import seaborn as sns
-# Optional: for fuzzy search
-# from fuzzywuzzy import process  
+# Optional fuzzy search
+from difflib import get_close_matches  
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -29,8 +26,16 @@ similarity_df, code_to_title, title_to_code = load_data()
 
 # ---------- Helper Functions ----------
 def find_code_from_title(title_input):
+    """Find occupation codes given part of a title (case insensitive)."""
     title_input = title_input.lower()
     matches = [code for code, title in code_to_title.items() if title_input in title.lower()]
+
+    # If no direct substring matches, use fuzzy matching
+    if not matches:
+        all_titles = list(code_to_title.values())
+        close_matches = get_close_matches(title_input, all_titles, n=5, cutoff=0.6)
+        matches = [title_to_code[t.lower()] for t in close_matches if t.lower() in title_to_code]
+
     return matches
 
 def get_top_similar(code, n=5):
@@ -71,8 +76,6 @@ menu = st.sidebar.radio(
         "Look up by title",
         "Search & Explore",
         "Compare two jobs",
-        "Similarity Network Graph",
-        "Heatmap View",
         "About the App",
     ],
 )
@@ -146,44 +149,6 @@ elif menu == "Compare two jobs":
                 )
             else:
                 st.error("❌ Could not compare occupations.")
-
-# ---- Similarity Network Graph ----
-elif menu == "Similarity Network Graph":
-    selected = st.selectbox("Select an occupation:", [f"{c} - {t}" for c, t in code_to_title.items()])
-    if selected:
-        code = selected.split(" - ")[0]
-        scores = similarity_df.loc[code].drop(code).nsmallest(10)
-        G = nx.Graph()
-        G.add_node(code, label=code_to_title.get(code, "Unknown"))
-        for occ, score in scores.items():
-            G.add_node(occ, label=code_to_title.get(occ, "Unknown"))
-            G.add_edge(code, occ, weight=1 / (score + 1e-6))  # inverse weight so closer = stronger
-
-        pos = nx.spring_layout(G, weight="weight")
-        plt.figure(figsize=(8, 6))
-        nx.draw(
-            G,
-            pos,
-            with_labels=True,
-            labels=nx.get_node_attributes(G, "label"),
-            node_size=2000,
-            node_color="skyblue",
-            font_size=8,
-        )
-        st.pyplot(plt)
-
-# ---- Heatmap View ----
-elif menu == "Heatmap View":
-    selected = st.multiselect(
-        "Select occupations to include in heatmap:",
-        [f"{c} - {t}" for c, t in code_to_title.items()],
-    )
-    if len(selected) > 1:
-        codes = [s.split(" - ")[0] for s in selected]
-        sub_df = similarity_df.loc[codes, codes]
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(sub_df, annot=True, cmap="viridis", xticklabels=[code_to_title[c] for c in codes], yticklabels=[code_to_title[c] for c in codes])
-        st.pyplot(plt)
 
 # ---- About the App ----
 elif menu == "About the App":
