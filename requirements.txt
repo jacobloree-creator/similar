@@ -2,6 +2,3 @@ pandas
 openpyxl
 streamlit
 altair
-networkx
-matplotlib.pyplot
-seaborn
