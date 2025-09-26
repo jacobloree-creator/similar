@@ -90,6 +90,7 @@ with st.expander("ℹ️ About this app"):
           which find the average occupation switch costs roughly two months of origin occupation wages.  
           This is scaled by how different two jobs are. We use Cortes and Gallipoli (2016)'s parameter of the 
           cost increasing by roughly 14% per standard deviation of similarity score increase.
+          """
     )
 
 menu = ["Compare two jobs", "Look up by code", "Look up by title"]
