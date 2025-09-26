@@ -84,13 +84,27 @@ st.title("Occupation Similarity & Switching Costs")
 with st.expander("ℹ️ About this app"):
     st.markdown(
         """
-        - Similarity scores are based on the Euclidean distance of O*NET skill, knowledge, and ability vectors. 
-          Smaller scores mean the two occupations are more similar.  
-        - Switching costs are calculated Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed), 
-          which find the average occupation switch costs roughly two months of origin occupation wages.  
-          This is scaled by how different two jobs are. We use Cortes and Gallipoli (2016)'s parameter of the 
-          cost increasing by roughly 14% per standard deviation of similarity score increase.
-          """
+        ### Methodology (Placeholder)
+
+        - **Similarity Matrix:** Based on Euclidean distance of O*NET-style skill/task vectors.  
+        - **Standardization:** Distances are standardized into z-scores across all occupation pairs.  
+        - **Switching Costs:** Following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed), 
+          switching occupations costs roughly **two months of wages** for the origin occupation.  
+          We scale this by how different two jobs are (their standardized distance).  
+
+        Formula:  
+        \[
+        \text{Cost}_{ij} = (2 \times \text{monthly\_wage}_i) \times (1 + \beta \cdot z_{ij})
+        \]  
+
+        - *i* = origin occupation  
+        - *j* = destination occupation  
+        - \(\beta\) = adjustment factor (default 0.14)  
+        - \(z_{ij}\) = standardized skill distance  
+
+        ---
+        Replace this text with the full methodology explanation once finalized.
+        """
     )
 
 menu = ["Compare two jobs", "Look up by code", "Look up by title"]
@@ -100,8 +114,13 @@ choice = st.sidebar.radio("Select Option", menu)
 if choice == "Compare two jobs":
     st.header("Compare Two Jobs")
 
-    job1_code = st.text_input("Enter first job code (NOC):").zfill(5).strip()
-    job2_code = st.text_input("Enter second job code (NOC):").zfill(5).strip()
+    options = [f"{c} – {code_to_title.get(c, 'Unknown')}" for c in similarity_df.index]
+
+    job1_item = st.selectbox("Select first occupation:", sorted(options), key="job1")
+    job2_item = st.selectbox("Select second occupation:", sorted(options), key="job2")
+
+    job1_code = job1_item.split(" – ")[0]
+    job2_code = job2_item.split(" – ")[0]
 
     if st.button("Compare"):
         result = compare_two_jobs(job1_code, job2_code)
@@ -166,29 +185,30 @@ elif choice == "Look up by code":
 elif choice == "Look up by title":
     st.header("Look Up by Title")
 
-    job_title = st.text_input("Enter job title:").lower().strip()
+    options = [f"{c} – {code_to_title.get(c, 'Unknown')}" for c in similarity_df.index]
+    selected_item = st.selectbox("Select occupation:", sorted(options))
 
-    if job_title in title_to_code:
-        job_code = title_to_code[job_title]
-        st.subheader(f"Job: {job_code} - {job_title.title()}")
+    job_code = selected_item.split(" – ")[0]
 
-        similarities = similarity_df.loc[job_code].dropna().sort_values()
+    st.subheader(f"Job: {job_code} - {code_to_title.get(job_code, 'Unknown')}")
 
-        df = pd.DataFrame({
-            "code": similarities.index,
-            "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
-            "similarity_score": similarities.values,
-            "switching_cost": [
-                calculate_switching_cost(job_code, c) for c in similarities.index
-            ]
-        })
+    similarities = similarity_df.loc[job_code].dropna().sort_values()
 
-        df["switching_cost"] = df["switching_cost"].apply(
-            lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
-        )
+    df = pd.DataFrame({
+        "code": similarities.index,
+        "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
+        "similarity_score": similarities.values,
+        "switching_cost": [
+            calculate_switching_cost(job_code, c) for c in similarities.index
+        ]
+    })
 
-        st.subheader("Most Similar Occupations")
-        st.dataframe(df.head(10), use_container_width=True)
+    df["switching_cost"] = df["switching_cost"].apply(
+        lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
+    )
 
-        st.subheader("Least Similar Occupations")
-        st.dataframe(df.tail(10), use_container_width=True)
+    st.subheader("Most Similar Occupations")
+    st.dataframe(df.head(10), use_container_width=True)
+
+    st.subheader("Least Similar Occupations")
+    st.dataframe(df.tail(10), use_container_width=True)
