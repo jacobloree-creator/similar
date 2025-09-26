@@ -201,3 +201,16 @@ elif choice == "Look up by title":
         "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
         "similarity_score": similarities.values,
         "switching_cost": [
+            calculate_switching_cost(job_code, c) for c in similarities.index
+        ]
+    })
+
+    df["switching_cost"] = df["switching_cost"].apply(
+        lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
+    )
+
+    st.subheader("Most Similar Occupations")
+    st.dataframe(df.head(10), use_container_width=True)
+
+    st.subheader("Least Similar Occupations")
+    st.dataframe(df.tail(10), use_container_width=True)
