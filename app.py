@@ -160,7 +160,8 @@ elif choice == "Look up by code":
     if job_code in similarity_df.index:
         st.subheader(f"Job: {job_code} - {code_to_title.get(job_code, 'Unknown')}")
 
-        similarities = similarity_df.loc[job_code].dropna().sort_values()
+        similarities = similarity_df.loc[job_code].dropna()
+        similarities = similarities[similarities != 0].sort_values()  # omit 0
 
         df = pd.DataFrame({
             "code": similarities.index,
@@ -192,23 +193,11 @@ elif choice == "Look up by title":
 
     st.subheader(f"Job: {job_code} - {code_to_title.get(job_code, 'Unknown')}")
 
-    similarities = similarity_df.loc[job_code].dropna().sort_values()
+    similarities = similarity_df.loc[job_code].dropna()
+    similarities = similarities[similarities != 0].sort_values()  # omit 0
 
     df = pd.DataFrame({
         "code": similarities.index,
         "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
         "similarity_score": similarities.values,
         "switching_cost": [
-            calculate_switching_cost(job_code, c) for c in similarities.index
-        ]
-    })
-
-    df["switching_cost"] = df["switching_cost"].apply(
-        lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
-    )
-
-    st.subheader("Most Similar Occupations")
-    st.dataframe(df.head(10), use_container_width=True)
-
-    st.subheader("Least Similar Occupations")
-    st.dataframe(df.tail(10), use_container_width=True)
