@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
-import altair as alt
+import matplotlib.pyplot as plt
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -36,8 +37,7 @@ def load_data():
 
 similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage = load_data()
 
-
-# ---------- Switching Cost Function ----------
+# ---------- Cost Function ----------
 def calculate_switching_cost(code1, code2, beta=0.14):
     """Estimate switching cost from occupation code1 to code2."""
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
@@ -60,185 +60,134 @@ def calculate_switching_cost(code1, code2, beta=0.14):
     cost = base_cost * (1 + beta * z_score)
     return cost
 
-
-# ---------- Helper Functions ----------
-def get_most_and_least_similar(code, n=5):
-    if code not in similarity_df.index:
-        return None, None, None
-    scores = similarity_df.loc[code].drop(code).dropna()
-    top_matches = scores.nsmallest(n)
-    bottom_matches = scores.nlargest(n)
-
-    top_results = [(occ,
-                    code_to_title.get(occ, "Unknown Title"),
-                    score,
-                    calculate_switching_cost(code, occ))
-                   for occ, score in top_matches.items()]
-
-    bottom_results = [(occ,
-                       code_to_title.get(occ, "Unknown Title"),
-                       score,
-                       calculate_switching_cost(code, occ))
-                      for occ, score in bottom_matches.items()]
-
-    return top_results, bottom_results, scores
-
-
+# ---------- Comparison Function ----------
 def compare_two_jobs(code1, code2):
-    if code1 not in similarity_df.index or code2 not in similarity_df.index:
+    """Compare two jobs by similarity and get ranking."""
+    if code1 not in similarity_df.index or code2 not in similarity_df.columns:
         return None
-    scores = similarity_df.loc[code1].drop(code1).dropna().sort_values()
-    if code2 not in scores.index:
-        return None
-    rank = scores.index.get_loc(code2) + 1
-    total = len(scores)
-    score = similarity_df.loc[code1, code2]
-    if pd.isna(score):
-        score = similarity_df.loc[code2, code1]
-    if pd.isna(score):
-        return None
-    cost = calculate_switching_cost(code1, code2)
-    return score, rank, total, cost
 
+    score = similarity_df.loc[code1, code2]
+
+    similarities = similarity_df.loc[code1].sort_values()
+    rank = similarities.reset_index().reset_index()
+    rank.columns = ["rank", "code", "score"]
+    rank["rank"] += 1
+    rank = rank.set_index("code")
+    rank_value = rank.loc[code2, "rank"]
+
+    return score, rank_value, len(similarities)
 
 # ---------- Streamlit App ----------
-st.set_page_config(page_title="Occupation Similarity App", layout="centered")
-st.title("🔍 Occupation Similarity App")
+st.title("Occupation Similarity & Switching Costs")
 
-# Sidebar
-n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+# ---------- About the App ----------
+with st.expander("ℹ️ About this app"):
+    st.markdown(
+        """
+        - Similarity scores are based on the Euclidean distance of O*NET skill, knowledge, and ability vectors. 
+          Smaller scores mean the two occupations are more similar.  
+        - Switching costs are calculated Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed), 
+          which find the average occupation switch costs roughly two months of origin occupation wages.  
+          This is scaled by how different two jobs are. We use Cortes and Gallipoli (2016)'s parameter of the 
+          cost increasing by roughly 14% per standard deviation of similarity score increase.
+    )
 
+menu = ["Compare two jobs", "Look up by code", "Look up by title"]
+choice = st.sidebar.radio("Select Option", menu)
 
-# ---- Look up by code ----
-if menu == "Look up by code":
-    code = st.text_input("Enter 5-digit occupation code:")
-    if code:
-        code = str(code).zfill(5).strip()
-        if code in similarity_df.index:
-            top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
+# ---------- Compare Two Jobs ----------
+if choice == "Compare two jobs":
+    st.header("Compare Two Jobs")
 
-            # Most similar
-            st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score", "Switching Cost ($)"])
-            st.dataframe(df_top)
-
-            # Least similar
-            st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score", "Switching Cost ($)"])
-            st.dataframe(df_bottom)
-
-            # Histogram
-            st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
-            hist_df = pd.DataFrame({"score": all_scores.values})
-            hist_chart = (
-                alt.Chart(hist_df)
-                .mark_bar(opacity=0.7, color="steelblue")
-                .encode(
-                    alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
-                    alt.Y("count()", title="Number of Occupations"),
-                    tooltip=["count()"]
-                )
-                .properties(width=600, height=400)
-            )
-            st.altair_chart(hist_chart, use_container_width=True)
-        else:
-            st.error("❌ Invalid occupation code.")
-
-
-# ---- Look up by title ----
-elif menu == "Look up by title":
-    available_codes = [code for code in code_to_title if code in similarity_df.index]
-    all_titles = [f"{code} – {code_to_title[code]}" for code in available_codes]
-
-    search_input = st.text_input("Type occupation title (or part of it) to search:")
-    if search_input:
-        filtered_titles = [t for t in all_titles if search_input.lower() in t.lower()]
-        if not filtered_titles:
-            st.warning("No matching occupations found.")
-            selected_item = None
-        else:
-            selected_item = st.selectbox("Select an occupation:", filtered_titles)
-    else:
-        selected_item = st.selectbox("Select an occupation:", all_titles)
-
-    if selected_item:
-        selected_code, selected_title = selected_item.split(" – ")
-        top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
-
-        # Most similar
-        st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
-        df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score", "Switching Cost ($)"])
-        st.dataframe(df_top)
-
-        # Least similar
-        st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
-        df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score", "Switching Cost ($)"])
-        st.dataframe(df_bottom)
-
-        # Histogram
-        st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
-        hist_df = pd.DataFrame({"score": all_scores.values})
-        hist_chart = (
-            alt.Chart(hist_df)
-            .mark_bar(opacity=0.7, color="steelblue")
-            .encode(
-                alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
-                alt.Y("count()", title="Number of Occupations"),
-                tooltip=["count()"]
-            )
-            .properties(width=600, height=400)
-        )
-        st.altair_chart(hist_chart, use_container_width=True)
-
-
-# ---- Compare two jobs ----
-elif menu == "Compare two jobs":
-    available_codes = [code for code in code_to_title if code in similarity_df.index]
-    title_options = [f"{code} – {code_to_title[code]}" for code in available_codes]
-
-    job1_item = st.selectbox("Select first occupation:", sorted(title_options), key="job1")
-    job2_item = st.selectbox("Select second occupation:", sorted(title_options), key="job2")
-
-    job1_code, job1_title = job1_item.split(" – ")
-    job2_code, job2_title = job2_item.split(" – ")
+    job1_code = st.text_input("Enter first job code (NOC):").zfill(5).strip()
+    job2_code = st.text_input("Enter second job code (NOC):").zfill(5).strip()
 
     if st.button("Compare"):
         result = compare_two_jobs(job1_code, job2_code)
         if result:
-            score, rank, total, cost = result
+            score, rank, total = result
+            cost = calculate_switching_cost(job1_code, job2_code)
+
             st.success(
                 f"**Comparison Result:**\n\n"
-                f"- {job1_code} ({job1_title}) vs {job2_code} ({job2_title})\n"
-                f"- Similarity score: `{score:.4f}`\n"
+                f"- {job1_code} ({code_to_title.get(job1_code, 'Unknown')}) vs "
+                f"{job2_code} ({code_to_title.get(job2_code, 'Unknown')})\n"
+                f"- Similarity score (raw distance): `{score:.4f}`\n"
                 f"- Ranking: `{rank}` out of `{total}` occupations "
                 f"(#{rank} most similar to {job1_code})"
             )
 
             if cost is not None:
-                st.info(
-                    f"💰 **Estimated Switching Cost** (from {job1_code} → {job2_code}): "
-                    f"`${cost:,.0f}`"
-                )
+                st.info(f"💰 **Estimated Switching Cost**: "
+                        f"${cost:,.2f} (2 months wages × distance adjustment)")
 
-            # Histogram with marker
-            st.subheader(f"Similarity Score Distribution for {job1_code} – {job1_title}")
-            hist_df = pd.DataFrame({"score": similarity_df.loc[job1_code].drop(job1_code).dropna().values})
-            hist_chart = (
-                alt.Chart(hist_df)
-                .mark_bar(opacity=0.7, color="steelblue")
-                .encode(
-                    alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score"),
-                    alt.Y("count()", title="Number of Occupations"),
-                    tooltip=["count()"]
-                )
-                .properties(width=600, height=400)
-            )
-            line = (
-                alt.Chart(pd.DataFrame({"score": [score]}))
-                .mark_rule(color="red", strokeWidth=2)
-                .encode(x="score:Q")
-            )
-            st.altair_chart(hist_chart + line, use_container_width=True)
-        else:
-            st.error("❌ Could not compare occupations.")
+            # Histogram of similarities
+            similarities = similarity_df.loc[job1_code].dropna()
+            fig, ax = plt.subplots()
+            ax.hist(similarities, bins=30, edgecolor="black")
+            ax.axvline(score, color="red", linestyle="dashed", linewidth=1)
+            ax.set_title("Distribution of Similarities")
+            ax.set_xlabel("Similarity Score (distance)")
+            ax.set_ylabel("Frequency")
+            st.pyplot(fig)
+
+# ---------- Look Up by Code ----------
+elif choice == "Look up by code":
+    st.header("Look Up by Code")
+
+    job_code = st.text_input("Enter job code (NOC):").zfill(5).strip()
+
+    if job_code in similarity_df.index:
+        st.subheader(f"Job: {job_code} - {code_to_title.get(job_code, 'Unknown')}")
+
+        similarities = similarity_df.loc[job_code].dropna().sort_values()
+
+        df = pd.DataFrame({
+            "code": similarities.index,
+            "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
+            "similarity_score": similarities.values,
+            "switching_cost": [
+                calculate_switching_cost(job_code, c) for c in similarities.index
+            ]
+        })
+
+        df["switching_cost"] = df["switching_cost"].apply(
+            lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
+        )
+
+        st.subheader("Most Similar Occupations")
+        st.dataframe(df.head(10), use_container_width=True)
+
+        st.subheader("Least Similar Occupations")
+        st.dataframe(df.tail(10), use_container_width=True)
+
+# ---------- Look Up by Title ----------
+elif choice == "Look up by title":
+    st.header("Look Up by Title")
+
+    job_title = st.text_input("Enter job title:").lower().strip()
+
+    if job_title in title_to_code:
+        job_code = title_to_code[job_title]
+        st.subheader(f"Job: {job_code} - {job_title.title()}")
+
+        similarities = similarity_df.loc[job_code].dropna().sort_values()
+
+        df = pd.DataFrame({
+            "code": similarities.index,
+            "title": [code_to_title.get(c, "Unknown") for c in similarities.index],
+            "similarity_score": similarities.values,
+            "switching_cost": [
+                calculate_switching_cost(job_code, c) for c in similarities.index
+            ]
+        })
+
+        df["switching_cost"] = df["switching_cost"].apply(
+            lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
+        )
+
+        st.subheader("Most Similar Occupations")
+        st.dataframe(df.head(10), use_container_width=True)
+
+        st.subheader("Least Similar Occupations")
+        st.dataframe(df.tail(10), use_container_width=True)
