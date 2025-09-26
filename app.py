@@ -84,26 +84,13 @@ st.title("Occupation Similarity & Switching Costs")
 with st.expander("ℹ️ About this app"):
     st.markdown(
         """
-        ### Methodology (Placeholder)
 
-        - **Similarity Matrix:** Based on Euclidean distance of O*NET-style skill/task vectors.  
-        - **Standardization:** Distances are standardized into z-scores across all occupation pairs.  
-        - **Switching Costs:** Following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed), 
-          switching occupations costs roughly **two months of wages** for the origin occupation.  
-          We scale this by how different two jobs are (their standardized distance).  
+        - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.
+          Smaller scores mean occupations are more similar.
+        - Switching costs are generated following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed) calibrations, 
+          where switching between occupations costs roughly two months of origin occupation wages.  
+          This penalty is scaled following Cortes and Gallipoli (2016), which finds the penalty is 16% higher per standard deviation increase in similarity score.  
 
-        Formula:  
-        \[
-        \text{Cost}_{ij} = (2 \times \text{monthly\_wage}_i) \times (1 + \beta \cdot z_{ij})
-        \]  
-
-        - *i* = origin occupation  
-        - *j* = destination occupation  
-        - \(\beta\) = adjustment factor (default 0.14)  
-        - \(z_{ij}\) = standardized skill distance  
-
-        ---
-        Replace this text with the full methodology explanation once finalized.
         """
     )
 
