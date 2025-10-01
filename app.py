@@ -38,20 +38,22 @@ def load_data():
 similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage = load_data()
 
 # ---------- Helper Functions ----------
-def get_most_and_least_similar(code, n=5):
-    if code not in similarity_df.index:
-        return None, None, None
-    # Keep zero distances for top matches
-    scores = similarity_df.loc[code].drop(code).dropna()
-    
-    top_matches = scores.nsmallest(n)
-    bottom_matches = scores.nlargest(n)
-
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                   for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                      for occ, score in bottom_matches.items()]
-    return top_results, bottom_results, scores
+def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
+    """Estimate switching cost using geometric mean of origin/destination wages and non-linear skill distance."""
+    if code1 not in standardized_df.index or code2 not in standardized_df.index:
+        return None
+    z_score = standardized_df.loc[code1, code2]
+    if pd.isna(z_score):
+        z_score = standardized_df.loc[code2, code1]
+    if pd.isna(z_score):
+        return None
+    w_origin = code_to_wage.get(code1)
+    w_dest = code_to_wage.get(code2)
+    if w_origin is None or w_dest is None:
+        return None
+    base_cost = 2 * np.sqrt(w_origin * w_dest)
+    cost = base_cost * (1 + beta * abs(z_score)**alpha)  # <--- fix applied here
+    return cost
 
 
 def compare_two_jobs(code1, code2):
