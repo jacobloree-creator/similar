@@ -89,7 +89,9 @@ with st.expander("ℹ️ About this app"):
           Smaller scores mean occupations are more similar.
         - Switching costs are generated following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed) calibrations, 
           where switching between occupations costs roughly two months of origin occupation wages.  
-          This penalty is scaled following Cortes and Gallipoli (2016), which finds the penalty is 16% higher per standard deviation increase in similarity score.  
+          This penalty is scaled following Cortes and Gallipoli (2016), which finds the penalty is 16% higher per standard deviation increase in similarity score.
+          Since this penalty comes from an average impact and is applied linearly, expect costs to differ from real life for very close and very far away matches, as
+          costing is almost certainly non-linear.
 
         """
     )
