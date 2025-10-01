@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import altair as alt
+import numpy as np
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -41,13 +42,9 @@ def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
         return None, None, None
     scores = similarity_df.loc[code].drop(code).dropna()
-
-    # Remove zeros
-    scores = scores[scores != 0]
-
+    scores = scores[scores != 0]  # Remove zeros
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
-
     top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
                    for occ, score in top_matches.items()]
     bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
@@ -71,8 +68,8 @@ def compare_two_jobs(code1, code2):
         return None
     return score, rank, total
 
-def calculate_switching_cost(code1, code2, beta=0.14):
-    """Estimate switching cost from occupation code1 to code2."""
+def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
+    """Estimate switching cost using geometric mean of origin/destination wages and non-linear skill distance."""
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
         return None
     z_score = standardized_df.loc[code1, code2]
@@ -80,11 +77,12 @@ def calculate_switching_cost(code1, code2, beta=0.14):
         z_score = standardized_df.loc[code2, code1]
     if pd.isna(z_score):
         return None
-    wage = code_to_wage.get(code1)
-    if wage is None:
+    w_origin = code_to_wage.get(code1)
+    w_dest = code_to_wage.get(code2)
+    if w_origin is None or w_dest is None:
         return None
-    base_cost = 2 * wage
-    cost = base_cost * (1 + beta * z_score)
+    base_cost = 2 * np.sqrt(w_origin * w_dest)
+    cost = base_cost * (1 + beta * z_score**alpha)
     return cost
 
 def plot_histogram(scores, highlight_score=None):
@@ -113,17 +111,19 @@ def plot_histogram(scores, highlight_score=None):
 st.set_page_config(page_title="Occupation Similarity App", layout="wide")
 st.title("🔍 Occupation Similarity App")
 
+# Sidebar sliders for beta and alpha
+st.sidebar.subheader("Switching Cost Parameters")
+beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
+alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
+
 # About section
 with st.expander("ℹ️ About this app"):
     st.markdown(
         """
         - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.
           Smaller scores mean occupations are more similar.
-        - Switching costs are generated following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed) calibrations, 
-          where switching between occupations costs roughly two months of origin occupation wages.  
-          This penalty is scaled following Cortes and Gallipoli (2016), which finds the penalty is 16% higher per standard deviation increase in similarity score.
-          Since this penalty comes from an average impact and is applied linearly, expect costs to differ from real life for very close and very far away matches, as
-          costing is almost certainly non-linear.
+        - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.
+        - You can adjust the sensitivity parameters `beta` and `alpha` in the sidebar to see how costs change.
         """
     )
 
@@ -142,14 +142,14 @@ if menu == "Look up by code":
             # Most similar
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x))
+            df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
             df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
             # Least similar
             st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x))
+            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
             df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -170,14 +170,14 @@ elif menu == "Look up by title":
         # Most similar
         st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
         df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-        df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x))
+        df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
         df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
         st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
         # Least similar
         st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
         df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x))
+        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
         df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
         st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -200,7 +200,7 @@ elif menu == "Compare two jobs":
         result = compare_two_jobs(job1_code, job2_code)
         if result:
             score, rank, total = result
-            cost = calculate_switching_cost(job1_code, job2_code)
+            cost = calculate_switching_cost(job1_code, job2_code, beta=beta, alpha=alpha)
 
             st.success(
                 f"**Comparison Result:**\n\n"
@@ -212,10 +212,6 @@ elif menu == "Compare two jobs":
 
             if cost is not None:
                 st.info(f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                        f"`${cost:,.2f}` (2 months wages × distance adjustment)")
-
-            # Histogram with marker
-            st.subheader(f"Similarity Score Distribution for {job1_code} – {job1_title}")
-            st.altair_chart(plot_histogram(similarity_df.loc[job1_code].drop(job1_code).dropna(), highlight_score=score), use_container_width=True)
+                        f"`${cost:,.2f}` (geometric mean of origin/destination wages × non-linear skill adjustment)")
         else:
             st.error("❌ Could not compare occupations.")
