@@ -41,15 +41,18 @@ similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage = loa
 def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
         return None, None, None
+    # Keep zero distances for top matches
     scores = similarity_df.loc[code].drop(code).dropna()
-    scores = scores[scores != 0]  # Remove zeros
+    
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
+
     top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
                    for occ, score in top_matches.items()]
     bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
                       for occ, score in bottom_matches.items()]
     return top_results, bottom_results, scores
+
 
 def compare_two_jobs(code1, code2):
     if code1 not in similarity_df.index or code2 not in similarity_df.index:
