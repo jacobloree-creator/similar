@@ -1,220 +1,198 @@
 import streamlit as st
 import pandas as pd
-import os
-import altair as alt
+import numpy as np
+import matplotlib.pyplot as plt
 
 # ---------- Load Data ----------
 @st.cache_data
 def load_data():
-    base_path = os.path.dirname(__file__)
+    similarity = pd.read_excel("similarity_matrix.xlsx", index_col=0)
+    wages = pd.read_excel("monthly_wages.xlsx")
 
-    # Load similarity matrix (raw Euclidean distances)
-    similarity_df = pd.read_excel(os.path.join(base_path, "similarity matrix_v2.xlsx"), index_col=0)
-    similarity_df.index = similarity_df.index.astype(str).str.zfill(5).str.strip()
-    similarity_df.columns = similarity_df.columns.astype(str).str.zfill(5).str.strip()
+    wages = wages.set_index("code")["monthly_wage"]
+    return similarity, wages
 
-    # Load NOC titles
-    titles_df = pd.read_excel(os.path.join(base_path, "noc title.xlsx"))
-    titles_df.columns = titles_df.columns.str.strip().str.lower()
-    titles_df["noc"] = titles_df["noc"].astype(str).str.zfill(5).str.strip()
+similarity_matrix, wages = load_data()
 
-    # Load monthly wages
-    wages_df = pd.read_excel(os.path.join(base_path, "monthly_wages.xlsx"))
-    wages_df["noc"] = wages_df["noc"].astype(str).str.zfill(5).str.strip()
-    code_to_wage = dict(zip(wages_df["noc"], wages_df["monthly_wage"]))
+# ---------- Standardize Distances ----------
+distances = 1 - similarity_matrix  # assuming similarity ∈ [0,1]
+mean_dist = distances.values[np.triu_indices_from(distances, k=1)].mean()
+std_dist = distances.values[np.triu_indices_from(distances, k=1)].std()
 
-    # Create mappings
-    code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
-    title_to_code = {v.lower(): k for k, v in code_to_title.items()}
+standardized = (distances - mean_dist) / std_dist
 
-    # ---- Standardize distances (z-scores) ----
-    flat_scores = similarity_df.where(~pd.isna(similarity_df)).stack().values
-    mean_val, std_val = flat_scores.mean(), flat_scores.std()
-    standardized_df = (similarity_df - mean_val) / std_val
+# ---------- Switching Cost Function ----------
+BETA = 0.14
 
-    return similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage
+def calculate_cost(origin, dest):
+    if origin not in wages:
+        return np.nan
+    base_cost = 2 * wages[origin]
+    adj = 1 + BETA * standardized.loc[origin, dest]
+    return max(base_cost * adj, 0)
 
-similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage = load_data()
+# Build cost matrix
+cost_matrix = pd.DataFrame(index=similarity_matrix.index, columns=similarity_matrix.columns)
+for i in similarity_matrix.index:
+    for j in similarity_matrix.columns:
+        if i != j:
+            cost_matrix.loc[i, j] = calculate_cost(i, j)
 
-# ---------- Helper Functions ----------
-def get_most_and_least_similar(code, n=5):
-    if code not in similarity_df.index:
-        return None, None, None
-    scores = similarity_df.loc[code].drop(code).dropna()
+cost_matrix = cost_matrix.astype(float)
 
-    # Remove zeros
-    scores = scores[scores != 0]
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="Occupation Similarity & Switching Costs", layout="wide")
 
-    top_matches = scores.nsmallest(n)
-    bottom_matches = scores.nlargest(n)
+st.title("🔍 Occupation Similarity & Switching Costs")
 
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                   for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                      for occ, score in bottom_matches.items()]
-    return top_results, bottom_results, scores
-
-def compare_two_jobs(code1, code2):
-    if code1 not in similarity_df.index or code2 not in similarity_df.index:
-        return None
-    scores = similarity_df.loc[code1].drop(code1).dropna()
-    scores = scores[scores != 0]  # remove zeros
-    scores = scores.sort_values()
-    if code2 not in scores.index:
-        return None
-    rank = scores.index.get_loc(code2) + 1
-    total = len(scores)
-    score = similarity_df.loc[code1, code2]
-    if pd.isna(score):
-        score = similarity_df.loc[code2, code1]
-    if pd.isna(score):
-        return None
-    return score, rank, total
-
-def calculate_switching_cost(code1, code2, beta=0.14):
-    """Estimate switching cost from occupation code1 to code2."""
-    if code1 not in standardized_df.index or code2 not in standardized_df.index:
-        return None
-    z_score = standardized_df.loc[code1, code2]
-    if pd.isna(z_score):
-        z_score = standardized_df.loc[code2, code1]
-    if pd.isna(z_score):
-        return None
-    wage = code_to_wage.get(code1)
-    if wage is None:
-        return None
-    base_cost = 2 * wage
-    cost = base_cost * (1 + beta * z_score)
-    return cost
-
-# ---------- Streamlit App ----------
-st.set_page_config(page_title="Occupation Similarity App", layout="wide")
-st.title("🔍 Occupation Similarity App")
-
-# About section
+# ---------- About the App ----------
 with st.expander("ℹ️ About this app"):
     st.markdown(
         """
-        ### Methodology (Placeholder)
-
-        - **Similarity Matrix:** Based on Euclidean distance of O*NET-style skill/task vectors.  
-        - **Standardization:** Distances are standardized into z-scores across all occupation pairs.  
-        - **Switching Costs:** Following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed), 
-          switching occupations costs roughly **two months of wages** for the origin occupation.  
-          We scale this by how different two jobs are (their standardized distance).  
-
-        Formula:  
-        \[
-        \text{Cost}_{ij} = (2 \times \text{monthly\_wage}_i) \times (1 + \beta \cdot z_{ij})
-        \]  
-
-        - *i* = origin occupation  
-        - *j* = destination occupation  
-        - \(\beta\) = adjustment factor (default 0.14)  
-        - \(z_{ij}\) = standardized skill distance  
-
-        ---
-        Replace this text with the full methodology explanation once finalized.
+        - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.
+          Smaller scores mean occupations are more similar.
+        - Switching costs are generated following Kambourov & Manovskii (2009) and Hawkins (2017, KC Fed) calibrations, 
+          where switching between occupations costs roughly two months of origin occupation wages.  
+          This penalty is scaled following Cortes and Gallipoli (2016), which finds the penalty is 16% higher per standard deviation increase in similarity score.
+          Since this penalty comes from an average impact and is applied linearly, expect costs to differ from real life for very close and very far away matches, as
+          costing is almost certainly non-linear.
         """
     )
 
-# Sidebar
-n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+# ---------- Tabs ----------
+tab1, tab2, tab3 = st.tabs(["Look up by Code", "Look up by Title", "Compare Two Jobs"])
 
-# ---- Look up by code ----
-if menu == "Look up by code":
-    code = st.text_input("Enter 5-digit occupation code:")
+# ---------- Look up by Code ----------
+with tab1:
+    st.header("Look Up by Occupation Code")
+    code = st.selectbox("Select an occupation code:", similarity_matrix.index)
+
     if code:
-        code = str(code).zfill(5).strip()
-        if code in similarity_df.index:
-            top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
+        df = pd.DataFrame({
+            "code": similarity_matrix.columns,
+            "similarity": similarity_matrix.loc[code],
+            "standardized_distance": standardized.loc[code],
+            "switching_cost": cost_matrix.loc[code]
+        }).drop(index=code).dropna()
 
-            # Most similar
-            st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x))
-            df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+        df = df[df["similarity"] != 0]  # remove zero similarity
 
-            st.dataframe(
-                df_top,
-                use_container_width=True,
-                column_config={"Title": st.column_config.Column(width="large")}
-            )
-
-            # Least similar
-            st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x))
-            df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-
-            st.dataframe(
-                df_bottom,
-                use_container_width=True,
-                column_config={"Title": st.column_config.Column(width="large")}
-            )
-
-# ---- Look up by title ----
-elif menu == "Look up by title":
-    available_codes = [code for code in code_to_title if code in similarity_df.index]
-    title_options = [f"{code} – {code_to_title[code]}" for code in available_codes]
-
-    selected_item = st.selectbox("Select an occupation:", sorted(title_options))
-    if selected_item:
-        selected_code, selected_title = selected_item.split(" – ")
-        top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
-
-        # Most similar
-        st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
-        df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-        df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x))
-        df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-
-        st.dataframe(
-            df_top,
-            use_container_width=True,
-            column_config={"Title": st.column_config.Column(width="large")}
+        df["switching_cost"] = df["switching_cost"].apply(
+            lambda x: f"{x:,.2f}"
         )
 
-        # Least similar
-        st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
-        df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x))
-        df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-
+        st.subheader("Most Similar Occupations")
         st.dataframe(
-            df_bottom,
+            df.sort_values("similarity", ascending=False).head(10),
             use_container_width=True,
-            column_config={"Title": st.column_config.Column(width="large")}
+            column_config={
+                "code": st.column_config.Column("Code", width="small"),
+                "similarity": st.column_config.NumberColumn("Similarity", format="%.3f"),
+                "standardized_distance": st.column_config.NumberColumn("Std Distance", format="%.2f"),
+                "switching_cost": st.column_config.TextColumn("Switching Cost ($)")
+            }
         )
 
-# ---- Compare two jobs ----
-elif menu == "Compare two jobs":
-    available_codes = [code for code in code_to_title if code in similarity_df.index]
-    title_options = [f"{code} – {code_to_title[code]}" for code in available_codes]
+        st.subheader("Least Similar Occupations")
+        st.dataframe(
+            df.sort_values("similarity", ascending=True).head(10),
+            use_container_width=True,
+            column_config={
+                "code": st.column_config.Column("Code", width="small"),
+                "similarity": st.column_config.NumberColumn("Similarity", format="%.3f"),
+                "standardized_distance": st.column_config.NumberColumn("Std Distance", format="%.2f"),
+                "switching_cost": st.column_config.TextColumn("Switching Cost ($)")
+            }
+        )
 
-    job1_item = st.selectbox("Select first occupation:", sorted(title_options), key="job1")
-    job2_item = st.selectbox("Select second occupation:", sorted(title_options), key="job2")
+# ---------- Look up by Title ----------
+with tab2:
+    st.header("Look Up by Occupation Title")
+    title_map = pd.read_excel("occupation_titles.xlsx").set_index("code")["title"]
 
-    job1_code, job1_title = job1_item.split(" – ")
-    job2_code, job2_title = job2_item.split(" – ")
+    code_by_title = {v: k for k, v in title_map.items()}
+    title = st.selectbox("Select an occupation title:", sorted(code_by_title.keys()))
 
-    if st.button("Compare"):
-        result = compare_two_jobs(job1_code, job2_code)
-        if result:
-            score, rank, total = result
-            cost = calculate_switching_cost(job1_code, job2_code)
+    if title:
+        code = code_by_title[title]
+        df = pd.DataFrame({
+            "code": similarity_matrix.columns,
+            "title": title_map,
+            "similarity": similarity_matrix.loc[code],
+            "standardized_distance": standardized.loc[code],
+            "switching_cost": cost_matrix.loc[code]
+        }).drop(index=code).dropna()
 
-            st.success(
-                f"**Comparison Result:**\n\n"
-                f"- {job1_code} ({job1_title}) vs {job2_code} ({job2_title})\n"
-                f"- Similarity score (raw distance): `{score:.4f}`\n"
-                f"- Ranking: `{rank}` out of `{total}` occupations "
-                f"(#{rank} most similar to {job1_code})"
-            )
+        df = df[df["similarity"] != 0]  # remove zero similarity
 
-            if cost is not None:
-                st.info(f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                        f"`${cost:,.2f}` (2 months wages × distance adjustment)")
-        else:
-            st.error("❌ Could not compare occupations.")
+        df["switching_cost"] = df["switching_cost"].apply(
+            lambda x: f"{x:,.2f}"
+        )
+
+        st.subheader("Most Similar Occupations")
+        st.dataframe(
+            df.sort_values("similarity", ascending=False).head(10),
+            use_container_width=True,
+            column_config={
+                "code": st.column_config.Column("Code", width="small"),
+                "title": st.column_config.Column("Title", width="large"),
+                "similarity": st.column_config.NumberColumn("Similarity", format="%.3f"),
+                "standardized_distance": st.column_config.NumberColumn("Std Distance", format="%.2f"),
+                "switching_cost": st.column_config.TextColumn("Switching Cost ($)")
+            }
+        )
+
+        st.subheader("Least Similar Occupations")
+        st.dataframe(
+            df.sort_values("similarity", ascending=True).head(10),
+            use_container_width=True,
+            column_config={
+                "code": st.column_config.Column("Code", width="small"),
+                "title": st.column_config.Column("Title", width="large"),
+                "similarity": st.column_config.NumberColumn("Similarity", format="%.3f"),
+                "standardized_distance": st.column_config.NumberColumn("Std Distance", format="%.2f"),
+                "switching_cost": st.column_config.TextColumn("Switching Cost ($)")
+            }
+        )
+
+# ---------- Compare Two Jobs ----------
+with tab3:
+    st.header("Compare Two Occupations")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        job1 = st.selectbox("Select first occupation:", similarity_matrix.index, key="job1")
+    with col2:
+        job2 = st.selectbox("Select second occupation:", similarity_matrix.index, key="job2")
+
+    if job1 and job2:
+        sim = similarity_matrix.loc[job1, job2]
+        std = standardized.loc[job1, job2]
+        cost = cost_matrix.loc[job1, job2]
+
+        st.metric("Similarity Score", f"{sim:.3f}")
+        st.metric("Standardized Distance", f"{std:.2f}")
+        st.metric("Switching Cost", f"${cost:,.2f}")
+
+# ---------- Histograms ----------
+st.header("Distributions Across All Occupations")
+
+all_sims = similarity_matrix.values.flatten()
+all_sims = all_sims[all_sims != 0]
+
+all_costs = cost_matrix.values.flatten()
+all_costs = all_costs[~np.isnan(all_costs)]
+
+fig1, ax1 = plt.subplots()
+ax1.hist(all_sims, bins=30, color="skyblue", edgecolor="black")
+ax1.set_title("Distribution of Similarity Scores")
+ax1.set_xlabel("Similarity")
+ax1.set_ylabel("Frequency")
+st.pyplot(fig1)
+
+fig2, ax2 = plt.subplots()
+ax2.hist(all_costs, bins=30, color="salmon", edgecolor="black")
+ax2.set_title("Distribution of Switching Costs")
+ax2.set_xlabel("Cost ($)")
+ax2.set_ylabel("Frequency")
+st.pyplot(fig2)
