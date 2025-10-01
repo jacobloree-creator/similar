@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 # ---------- Load Data ----------
 @st.cache_data
 def load_data():
-    similarity = pd.read_excel("similarity_matrix.xlsx", index_col=0)
+    similarity = pd.read_excel("similarity_matrix_v2.xlsx", index_col=0)
     wages = pd.read_excel("monthly_wages.xlsx")
 
     wages = wages.set_index("code")["monthly_wage"]
@@ -108,7 +108,7 @@ with tab1:
 # ---------- Look up by Title ----------
 with tab2:
     st.header("Look Up by Occupation Title")
-    title_map = pd.read_excel("occupation_titles.xlsx").set_index("code")["title"]
+    title_map = pd.read_excel("noc title.xlsx").set_index("code")["title"]
 
     code_by_title = {v: k for k, v in title_map.items()}
     title = st.selectbox("Select an occupation title:", sorted(code_by_title.keys()))
