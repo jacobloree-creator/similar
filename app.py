@@ -108,8 +108,8 @@ def plot_histogram(scores, highlight_score=None):
     return hist_chart
 
 # ---------- Streamlit App ----------
-st.set_page_config(page_title="Occupation Similarity App", layout="wide")
-st.title("🔍 Occupation Similarity App")
+st.set_page_config(page_title="APOLLO", layout="wide")
+st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour Outcomes (APOLLO)")
 
 # Sidebar sliders for beta and alpha
 st.sidebar.subheader("Switching Cost Parameters")
@@ -123,7 +123,13 @@ with st.expander("ℹ️ About this app"):
         - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.
           Smaller scores mean occupations are more similar.
         - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.
-        - You can adjust the sensitivity parameters `beta` and `alpha` in the sidebar to see how costs change.
+        It takes the form 
+        $$
+        \text{SwitchingCost} = 2 \cdot w_o \cdot w_d \cdot \left(1 + \beta \cdot z_{\text{score}}^{\alpha}\right).
+        $$
+        - You can adjust the sensitivity parameters `beta` and `alpha` in the sidebar to see how costs change. `beta` denotes the "skill dissimilarity punishment" factor.
+        A larger `beta` means costs rise as jobs become less similar. `alpha` denotes the nonlinearity of switching costs. A larger `alpha` denotes
+        a more nonlinear distribution.
         """
     )
 
