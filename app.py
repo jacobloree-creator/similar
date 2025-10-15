@@ -118,7 +118,7 @@ alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_valu
 
 # About section
 with st.expander("Methodology"):
-st.markdown(
+    st.markdown(
     r"""
     - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
       Smaller scores mean occupations are more similar.  
@@ -128,7 +128,7 @@ st.markdown(
       $\beta$ denotes the "skill dissimilarity punishment" factor — a larger $\beta$ means costs rise as jobs become less similar.  
       $\alpha$ denotes the nonlinearity of switching costs — a larger $\alpha$ produces a more nonlinear distribution.  
     """
-)
+    )
 
 # Sidebar
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
