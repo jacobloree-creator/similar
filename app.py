@@ -117,18 +117,18 @@ beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_val
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
 # About section
-with st.expander("ℹ️ About this app"):
-    st.markdown(
-        """
-        - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.
-          Smaller scores mean occupations are more similar.
-        - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.
-        It takes the form $SwitchingCost = 2 \cdot w_o \cdot w_d \cdot (1 + \beta \cdot z_{score}^{\alpha})$.
-        - You can adjust the sensitivity parameters $\beta$ and $\alpha in the sidebar to see how costs change. `beta` denotes the "skill dissimilarity punishment" factor.
-        A larger $\beta$ means costs rise as jobs become less similar. $\alpha$ denotes the nonlinearity of switching costs. A larger `alpha` denotes
-        a more nonlinear distribution.
-        """
-    )
+with st.expander("Methodology"):
+st.markdown(
+    r"""
+    - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
+      Smaller scores mean occupations are more similar.  
+    - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.  
+      It takes the form $SwitchingCost = 2 \cdot w_o \cdot w_d \cdot (1 + \beta \cdot z_{score}^{\alpha})$.  
+    - You can adjust the sensitivity parameters $\beta$ and $\alpha$ in the sidebar to see how costs change.  
+      $\beta$ denotes the "skill dissimilarity punishment" factor — a larger $\beta$ means costs rise as jobs become less similar.  
+      $\alpha$ denotes the nonlinearity of switching costs — a larger $\alpha$ produces a more nonlinear distribution.  
+    """
+)
 
 # Sidebar
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
