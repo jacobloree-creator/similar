@@ -124,8 +124,8 @@ with st.expander("ℹ️ About this app"):
           Smaller scores mean occupations are more similar.
         - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.
         It takes the form $SwitchingCost = 2 \cdot w_o \cdot w_d \cdot (1 + \beta \cdot z_{score}^{\alpha})$.
-        - You can adjust the sensitivity parameters `beta` and `alpha` in the sidebar to see how costs change. `beta` denotes the "skill dissimilarity punishment" factor.
-        A larger `beta` means costs rise as jobs become less similar. `alpha` denotes the nonlinearity of switching costs. A larger `alpha` denotes
+        - You can adjust the sensitivity parameters $\beta$ and $\alpha in the sidebar to see how costs change. `beta` denotes the "skill dissimilarity punishment" factor.
+        A larger $\beta$ means costs rise as jobs become less similar. $\alpha$ denotes the nonlinearity of switching costs. A larger `alpha` denotes
         a more nonlinear distribution.
         """
     )
