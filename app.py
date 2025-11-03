@@ -105,7 +105,7 @@ def training_multiplier(z_score):
         return 2.0
 
 # ---- Calibration for risky -> safe-haven only ----
-def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14, alpha=1.2):
+def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs equals target_usd.
     Returns (k, n_pairs_used).
@@ -138,8 +138,8 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14
 
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """
-    Cost = k^I * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]
-    where I is 1 if 'apply calibration' is checked, else 0.
+    Cost = k * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]
+    Calibration k is ALWAYS applied.
     """
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
         return None
@@ -156,7 +156,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     base_cost = 2 * np.sqrt(w_origin * w_dest)
     multiplier = training_multiplier(z_score)
     raw_cost = base_cost * (1 + beta * abs(z_score)**alpha) * multiplier
-    return (CALIB_K if APPLY_CALIBRATION else 1.0) * raw_cost
+    return CALIB_K * raw_cost  # always calibrated
 
 def plot_histogram(scores, highlight_score=None):
     hist_df = pd.DataFrame({"score": scores.values})
@@ -222,7 +222,6 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-# Compute k and remember how many pairs were used
 CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
@@ -234,10 +233,7 @@ st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
-# NEW: Sidebar control to apply or skip calibration (so you can see the change)
-APPLY_CALIBRATION = st.sidebar.checkbox("Apply calibration (anchor risky→safe avg to $20k)", value=True)
-
-# NEW: Quick status block so you can verify the automation file is used
+# Status block to verify calibration & ROA ingestion
 with st.sidebar.expander("Calibration status", expanded=False):
     st.markdown(
         f"""
@@ -245,7 +241,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Risky codes (ROA ≥ 0.70):** {len(RISKY_CODES)}
 - **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
 - **Risky→Safe pairs used:** {CALIB_PAIRS}
-- **Calibration k:** {CALIB_K:.3f}
+- **Calibration k (always applied):** {CALIB_K:.3f}
 """
     )
 
@@ -257,11 +253,10 @@ with st.expander("Methodology"):
       Smaller scores mean occupations are more similar.  
     - Switching costs are calculated as  
       \[
-      \text{SwitchingCost} = k^{I} \cdot \Big(2 \sqrt{w_o w_d}\Big) \cdot \Big(1 + \beta \cdot |z|^{\alpha}\Big) \cdot m(|z|),
+      \text{SwitchingCost} = k \cdot \Big(2 \sqrt{w_o w_d}\Big) \cdot \Big(1 + \beta \cdot |z|^{\alpha}\Big) \cdot m(|z|),
       \]
-      where \(m(|z|)\in\{1.0, 1.2, 1.5, 2.0\}\), \(k\) is chosen so that the **average risky→safe** cost ≈ \$20{,}000,  
-      and \(I\in\{0,1\}\) depends on the sidebar checkbox **Apply calibration**.  
-    - Adjust \(\beta\) and \(\alpha\) in the sidebar to see sensitivity.  
+      where \(m(|z|)\in\{1.0, 1.2, 1.5, 2.0\}\) and \(k\) is chosen so that the **average risky job to safe job** cost ≈ \$24{,}000.  
+    - Adjust \(\beta\) (dissimilarity penalty) and \(\alpha\) (nonlinearity parameter) in the sidebar to see sensitivity.  
     """
     )
 
@@ -361,8 +356,7 @@ elif menu == "Compare two jobs":
             if cost is not None:
                 st.info(
                     f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                    f"`${cost:,.2f}` "
-                    f"{'(calibration ON)' if APPLY_CALIBRATION else '(calibration OFF)'}"
+                    f"`${cost:,.2f}` (calibration always applied)"
                 )
         else:
             st.error("❌ Could not compare occupations.")
