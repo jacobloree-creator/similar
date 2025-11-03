@@ -24,7 +24,7 @@ def load_data():
     wages_df["noc"] = wages_df["noc"].astype(str).str.zfill(5).str.strip()
     code_to_wage = dict(zip(wages_df["noc"], wages_df["monthly_wage"]))
 
-    # Load automation risk (CSV or XLSX). If file missing/invalid, leave empty dict.
+    # ---- Load automation risk (CSV or XLSX). If file missing/invalid, leave empty dict. ----
     code_to_roa = {}
     roa_csv = os.path.join(base_path, "automation_risk.csv")
     roa_xlsx = os.path.join(base_path, "automation_risk.xlsx")
@@ -33,12 +33,11 @@ def load_data():
         return series.astype(str).str.zfill(5).str.strip()
 
     try:
+        df = None
         if os.path.exists(roa_csv):
             df = pd.read_csv(roa_csv)
         elif os.path.exists(roa_xlsx):
             df = pd.read_excel(roa_xlsx)
-        else:
-            df = None
 
         if df is not None and not df.empty:
             cols = {c.lower().strip(): c for c in df.columns}
@@ -53,12 +52,12 @@ def load_data():
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
 
-    # Standardize distances (z-scores)
-    flat = similarity_df.where(~pd.isna(similarity_df)).stack().values
-    mean_val, std_val = flat.mean(), flat.std()
+    # ---- Standardize distances (z-scores) ----
+    flat_scores = similarity_df.where(~pd.isna(similarity_df)).stack().values
+    mean_val, std_val = flat_scores.mean(), flat_scores.std()
     standardized_df = (similarity_df - mean_val) / std_val
 
-    # IMPORTANT: return SIX values
+    # Return ROA mapping too
     return similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa
 
 similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa = load_data()
@@ -67,7 +66,6 @@ similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code
 def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
         return None, None, None
-    # Keep zeros (very similar) for top matches
     scores = similarity_df.loc[code].drop(code).dropna()
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
@@ -81,7 +79,7 @@ def compare_two_jobs(code1, code2):
     if code1 not in similarity_df.index or code2 not in similarity_df.index:
         return None
     scores = similarity_df.loc[code1].drop(code1).dropna()
-    scores = scores[scores != 0]  # remove zeros
+    scores = scores[scores != 0]
     scores = scores.sort_values()
     if code2 not in scores.index:
         return None
@@ -110,7 +108,7 @@ def training_multiplier(z_score):
 def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs equals target_usd.
-    If no valid pairs, returns 1.0.
+    Returns (k, n_pairs_used).
     """
     pairs = []
     for r in risky_codes:
@@ -119,7 +117,6 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14
         for s in safe_codes:
             if s == r or s not in standardized_df.index:
                 continue
-            # require wages for both
             if (code_to_wage.get(r) is None) or (code_to_wage.get(s) is None):
                 continue
             z = standardized_df.loc[r, s]
@@ -129,19 +126,21 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14
                 continue
             base = 2 * np.sqrt(code_to_wage[r] * code_to_wage[s])
             mult = training_multiplier(z)
-            raw_cost = base * (1 + 0.14 * abs(z)**1.2) * mult  # beta/alpha defaults here for calibration
+            raw_cost = base * (1 + beta * abs(z)**alpha) * mult
             pairs.append(raw_cost)
 
     if not pairs:
-        return 1.0
+        return 1.0, 0
     mean_raw = float(np.mean(pairs))
     if mean_raw <= 0:
-        return 1.0
-    return target_usd / mean_raw
+        return 1.0, 0
+    return target_usd / mean_raw, len(pairs)
 
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
-    """Estimate switching cost using geometric mean of origin/destination wages and non-linear skill distance,
-    multiplied by a training-intensity factor based on |z| bins, and a global calibration k for risky->safe."""
+    """
+    Cost = k^I * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]
+    where I is 1 if 'apply calibration' is checked, else 0.
+    """
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
         return None
     z_score = standardized_df.loc[code1, code2]
@@ -153,13 +152,13 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     w_dest = code_to_wage.get(code2)
     if w_origin is None or w_dest is None:
         return None
+
     base_cost = 2 * np.sqrt(w_origin * w_dest)
     multiplier = training_multiplier(z_score)
-    cost = base_cost * (1 + beta * abs(z_score)**alpha) * multiplier
-    return CALIB_K * cost  # apply global calibration
+    raw_cost = base_cost * (1 + beta * abs(z_score)**alpha) * multiplier
+    return (CALIB_K if APPLY_CALIBRATION else 1.0) * raw_cost
 
 def plot_histogram(scores, highlight_score=None):
-    """Helper to plot histogram with optional red marker."""
     hist_df = pd.DataFrame({"score": scores.values})
     hist_chart = (
         alt.Chart(hist_df)
@@ -182,7 +181,6 @@ def plot_histogram(scores, highlight_score=None):
 
 # ---- Switching cost distribution helpers ----
 def compute_switching_costs_from_origin(origin_code, beta, alpha):
-    """Return a DataFrame of switching costs from origin_code to all other occupations."""
     rows = []
     for dest in similarity_df.columns:
         if dest == origin_code:
@@ -197,7 +195,6 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
     return pd.DataFrame(rows)
 
 def plot_cost_histogram(cost_df):
-    """Histogram of switching costs (one bar per binned cost)."""
     if cost_df.empty:
         return alt.Chart(pd.DataFrame({"cost":[0]})).mark_bar().encode(
             alt.X("cost:Q", bin=alt.Bin(maxbins=1), title="Switching Cost ($)")
@@ -214,20 +211,19 @@ def plot_cost_histogram(cost_df):
     )
     return chart
 
-# ---------- Build risky/safe sets & calibration ----------
-# Thresholds aligned with OECD-style definitions
+# ---------- Risky/Safe sets & calibration ----------
 RISKY_THRESHOLD = 0.70   # ROA >= 0.70 → risky
-SAFE_THRESHOLD = 0.70    # ROA < 0.70 → safe (complement)
+SAFE_THRESHOLD = 0.70    # ROA < 0.70 → safe
 
 available_nocs = set(similarity_df.index) & set(code_to_wage.keys())
 if code_to_roa:
     RISKY_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] >= RISKY_THRESHOLD}
     SAFE_CODES  = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] <  SAFE_THRESHOLD}
 else:
-    # If automation data missing, fall back to empty sets -> k=1.0
     RISKY_CODES, SAFE_CODES = set(), set()
 
-CALIB_K = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
+# Compute k and remember how many pairs were used
+CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="APOLLO", layout="wide")
@@ -238,20 +234,34 @@ st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
+# NEW: Sidebar control to apply or skip calibration (so you can see the change)
+APPLY_CALIBRATION = st.sidebar.checkbox("Apply calibration (anchor risky→safe avg to $20k)", value=True)
+
+# NEW: Quick status block so you can verify the automation file is used
+with st.sidebar.expander("Calibration status", expanded=False):
+    st.markdown(
+        f"""
+- **ROA records loaded:** {'Yes' if code_to_roa else 'No'}
+- **Risky codes (ROA ≥ 0.70):** {len(RISKY_CODES)}
+- **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
+- **Risky→Safe pairs used:** {CALIB_PAIRS}
+- **Calibration k:** {CALIB_K:.3f}
+"""
+    )
+
 # About section
 with st.expander("Methodology"):
     st.markdown(
     r"""
     - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
       Smaller scores mean occupations are more similar.  
-    - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor,  
-      multiplied by a training-intensity multiplier based on standardized skill distance (|z| bins), and a global calibration factor **k**.  
-      It takes the form  
+    - Switching costs are calculated as  
       \[
-      \text{SwitchingCost} = k \cdot \Big( 2 \sqrt{w_o w_d} \cdot (1 + \beta \cdot |z|^{\alpha}) \cdot m(|z|) \Big),
+      \text{SwitchingCost} = k^{I} \cdot \Big(2 \sqrt{w_o w_d}\Big) \cdot \Big(1 + \beta \cdot |z|^{\alpha}\Big) \cdot m(|z|),
       \]
-      where \(m(|z|) \in \{1.0, 1.2, 1.5, 2.0\}\) and \(k\) is chosen so that the **average risky→safe** transition cost ≈ \$20,000.  
-    - You can adjust the sensitivity parameters \(\beta\) and \(\alpha\) in the sidebar to see how costs change.  
+      where \(m(|z|)\in\{1.0, 1.2, 1.5, 2.0\}\), \(k\) is chosen so that the **average risky→safe** cost ≈ \$20{,}000,  
+      and \(I\in\{0,1\}\) depends on the sidebar checkbox **Apply calibration**.  
+    - Adjust \(\beta\) and \(\alpha\) in the sidebar to see sensitivity.  
     """
     )
 
@@ -349,8 +359,10 @@ elif menu == "Compare two jobs":
             )
 
             if cost is not None:
-                st.info(f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                        f"`${cost:,.2f}` (geometric mean of wages × distance adjustment × training multiplier × calibration k)`")
-
+                st.info(
+                    f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
+                    f"`${cost:,.2f}` "
+                    f"{'(calibration ON)' if APPLY_CALIBRATION else '(calibration OFF)'}"
+                )
         else:
             st.error("❌ Could not compare occupations.")
