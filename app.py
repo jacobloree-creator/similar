@@ -248,17 +248,26 @@ with st.sidebar.expander("Calibration status", expanded=False):
 # About section
 with st.expander("Methodology"):
     st.markdown(
-    r"""
-    - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
-      Smaller scores mean occupations are more similar.  
-    - Switching costs are calculated as  
-      \[
-      \text{SwitchingCost} = k \cdot \Big(2 \sqrt{w_o w_d}\Big) \cdot \Big(1 + \beta \cdot |z|^{\alpha}\Big) \cdot m(|z|),
-      \]
-      where \(m(|z|)\in\{1.0, 1.2, 1.5, 2.0\}\) and \(k\) is chosen so that the **average risky job to safe job** cost ≈ \$24{,}000.  
-    - Adjust \(\beta\) (dissimilarity penalty) and \(\alpha\) (nonlinearity parameter) in the sidebar to see sensitivity.  
-    """
+        """
+- Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
+  Smaller scores mean occupations are more similar.  
+- Switching costs combine the geometric mean of origin/destination wages, a non-linear skill-distance term,  
+  a training-intensity multiplier based on standardized |z| bins, and a global calibration factor **k**.  
+        """
     )
+    st.latex(r"""
+\text{SwitchingCost}
+= k \cdot \left(2\,\sqrt{w_o\,w_d}\right)
+  \cdot \left(1 + \beta\,|z|^{\alpha}\right)
+  \cdot m(|z|)
+""")
+    st.markdown(
+        """
+- Here, \(m(|z|)\in\{1.0,\,1.2,\,1.5,\,2.0\}\), and **k** is chosen so that the **average risky → safe** transition cost is about **$24,000**.  
+- Adjust \\(\\beta\\) and \\(\\alpha\\) in the sidebar to see sensitivity.  
+        """
+    )
+
 
 # Sidebar
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
