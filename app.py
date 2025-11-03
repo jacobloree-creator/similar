@@ -74,11 +74,11 @@ def training_multiplier(z_score):
     if z < 0.5:
         return 1.0
     elif z < 1.0:
-        return 1.2
+        return 1.3
     elif z < 1.5:
-        return 1.5
+        return 1.6
     else:
-        return 2.0
+        return 2.2
 
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """Estimate switching cost using geometric mean of origin/destination wages and non-linear skill distance,
