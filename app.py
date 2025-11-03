@@ -24,47 +24,41 @@ def load_data():
     wages_df["noc"] = wages_df["noc"].astype(str).str.zfill(5).str.strip()
     code_to_wage = dict(zip(wages_df["noc"], wages_df["monthly_wage"]))
 
-    # ---- Load automation risk (ROA) ----
-    # Accept either CSV or XLSX even if named ".csv" in the folder
-    roa_path_csv = os.path.join(base_path, "automation_risk.csv")
-    roa_path_xlsx = os.path.join(base_path, "automation_risk.xlsx")
+    # Load automation risk (CSV or XLSX). If file missing/invalid, leave empty dict.
     code_to_roa = {}
+    roa_csv = os.path.join(base_path, "automation_risk.csv")
+    roa_xlsx = os.path.join(base_path, "automation_risk.xlsx")
 
-    def _normalize_noc(series):
+    def _norm(series):
         return series.astype(str).str.zfill(5).str.strip()
 
-    if os.path.exists(roa_path_csv):
-        try:
-            roa_df = pd.read_csv(roa_path_csv)
-            # allow flexible column names
-            cols = {c.lower().strip(): c for c in roa_df.columns}
-            noc_col = cols.get("noc") or cols.get("code") or list(roa_df.columns)[0]
-            prob_col = cols.get("roa_prob") or cols.get("automation_probability") or cols.get("probability") or list(roa_df.columns)[1]
-            roa_df[noc_col] = _normalize_noc(roa_df[noc_col])
-            code_to_roa = dict(zip(roa_df[noc_col], roa_df[prob_col]))
-        except Exception:
-            pass
-    elif os.path.exists(roa_path_xlsx):
-        try:
-            roa_df = pd.read_excel(roa_path_xlsx)
-            cols = {c.lower().strip(): c for c in roa_df.columns}
-            noc_col = cols.get("noc") or cols.get("code") or list(roa_df.columns)[0]
-            prob_col = cols.get("roa_prob") or cols.get("automation_probability") or cols.get("probability") or list(roa_df.columns)[1]
-            roa_df[noc_col] = _normalize_noc(roa_df[noc_col])
-            code_to_roa = dict(zip(roa_df[noc_col], roa_df[prob_col]))
-        except Exception:
-            pass
+    try:
+        if os.path.exists(roa_csv):
+            df = pd.read_csv(roa_csv)
+        elif os.path.exists(roa_xlsx):
+            df = pd.read_excel(roa_xlsx)
+        else:
+            df = None
+
+        if df is not None and not df.empty:
+            cols = {c.lower().strip(): c for c in df.columns}
+            noc_col = cols.get("noc") or cols.get("code") or list(df.columns)[0]
+            prob_col = cols.get("roa_prob") or cols.get("automation_probability") or cols.get("probability") or list(df.columns)[1]
+            df[noc_col] = _norm(df[noc_col])
+            code_to_roa = dict(zip(df[noc_col], df[prob_col]))
+    except Exception:
+        code_to_roa = {}
 
     # Create mappings
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
 
-    # ---- Standardize distances (z-scores) ----
-    flat_scores = similarity_df.where(~pd.isna(similarity_df)).stack().values
-    mean_val, std_val = flat_scores.mean(), flat_scores.std()
+    # Standardize distances (z-scores)
+    flat = similarity_df.where(~pd.isna(similarity_df)).stack().values
+    mean_val, std_val = flat.mean(), flat.std()
     standardized_df = (similarity_df - mean_val) / std_val
 
-    # Return ROA mapping too
+    # IMPORTANT: return SIX values
     return similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa
 
 similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa = load_data()
