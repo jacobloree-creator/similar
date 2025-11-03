@@ -262,11 +262,12 @@ with st.expander("Methodology"):
   \cdot m(|z|)
 """)
     st.markdown(
-        """
-- Here, \(m(|z|)\in\{1.0,\,1.2,\,1.5,\,2.0\}\), and **k** is chosen so that the **average risky → safe** transition cost is about **$24,000**.  
-- Adjust \\(\\beta\\) and \\(\\alpha\\) in the sidebar to see sensitivity.  
+        r"""
+- Here, \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \), and \( k \) is chosen so that the **average risky → safe** transition cost is about **$24,000**.  
+- Adjust \( \beta \) and \( \alpha \) in the sidebar to see sensitivity.  
         """
     )
+
 
 
 # Sidebar
