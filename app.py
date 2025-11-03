@@ -356,7 +356,7 @@ elif menu == "Compare two jobs":
             if cost is not None:
                 st.info(
                     f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                    f"`${cost:,.2f}` (calibration always applied)"
+                    f"`${cost:,.2f}` "
                 )
         else:
             st.error("❌ Could not compare occupations.")
