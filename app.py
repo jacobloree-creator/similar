@@ -107,6 +107,40 @@ def plot_histogram(scores, highlight_score=None):
         hist_chart = hist_chart + line
     return hist_chart
 
+# ---- NEW: Switching cost distribution helpers ----
+def compute_switching_costs_from_origin(origin_code, beta, alpha):
+    """Return a DataFrame of switching costs from origin_code to all other occupations."""
+    rows = []
+    for dest in similarity_df.columns:
+        if dest == origin_code:
+            continue
+        cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha)
+        if pd.notnull(cost):
+            rows.append({
+                "code": dest,
+                "title": code_to_title.get(dest, "Unknown Title"),
+                "cost": float(cost)
+            })
+    return pd.DataFrame(rows)
+
+def plot_cost_histogram(cost_df):
+    """Histogram of switching costs (one bar per binned cost)."""
+    if cost_df.empty:
+        return alt.Chart(pd.DataFrame({"cost":[0]})).mark_bar().encode(
+            alt.X("cost:Q", bin=alt.Bin(maxbins=1), title="Switching Cost ($)")
+        )
+    chart = (
+        alt.Chart(cost_df)
+        .mark_bar(opacity=0.7, color="seagreen")
+        .encode(
+            alt.X("cost:Q", bin=alt.Bin(maxbins=30), title="Switching Cost ($)"),
+            alt.Y("count()", title="Number of Occupations"),
+            tooltip=["count()"]
+        )
+        .properties(width=600, height=400)
+    )
+    return chart
+
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="APOLLO", layout="wide")
 st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour Outcomes (APOLLO)")
@@ -123,7 +157,7 @@ with st.expander("Methodology"):
     - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
       Smaller scores mean occupations are more similar.  
     - Switching costs are scaled using the geometric mean of origin and destination wages and a non-linear skill distance factor.  
-      It takes the form $SwitchingCost = 2 \cdot w_o \cdot w_d \cdot (1 + \beta \cdot z_{score}^{\alpha})$.  
+      It takes the form $SwitchingCost = 2 \cdot \sqrt{w_o w_d}\cdot (1 + \beta \cdot |z|^{\alpha})$.  
     - You can adjust the sensitivity parameters $\beta$ and $\alpha$ in the sidebar to see how costs change.  
       $\beta$ denotes the "skill dissimilarity punishment" factor — a larger $\beta$ means costs rise as jobs become less similar.  
       $\alpha$ denotes the nonlinearity of switching costs — a larger $\alpha$ produces a more nonlinear distribution.  
@@ -156,9 +190,14 @@ if menu == "Look up by code":
             df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
-            # Histogram
+            # Similarity histogram
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
             st.altair_chart(plot_histogram(all_scores), use_container_width=True)
+
+            # NEW: Switching cost histogram
+            costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
+            st.subheader(f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}")
+            st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
 
 # ---- Look up by title ----
 elif menu == "Look up by title":
@@ -184,9 +223,14 @@ elif menu == "Look up by title":
         df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
         st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
-        # Histogram
+        # Similarity histogram
         st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
         st.altair_chart(plot_histogram(all_scores), use_container_width=True)
+
+        # NEW: Switching cost histogram
+        costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha)
+        st.subheader(f"Switching Cost Distribution from {selected_code} – {selected_title}")
+        st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
 
 # ---- Compare two jobs ----
 elif menu == "Compare two jobs":
