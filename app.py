@@ -42,11 +42,48 @@ def load_data():
         if df is not None and not df.empty:
             cols = {c.lower().strip(): c for c in df.columns}
             noc_col = cols.get("noc") or cols.get("code") or list(df.columns)[0]
-            prob_col = cols.get("roa_prob") or cols.get("automation_probability") or cols.get("probability") or list(df.columns)[1]
+            prob_col = (
+                cols.get("roa_prob")
+                or cols.get("automation_probability")
+                or cols.get("probability")
+                or list(df.columns)[1]
+            )
             df[noc_col] = _norm(df[noc_col])
             code_to_roa = dict(zip(df[noc_col], df[prob_col]))
     except Exception:
         code_to_roa = {}
+
+    # ---- Load job-by-province share data (optional) ----
+    jobprov_df = pd.DataFrame()
+    jp_csv = os.path.join(base_path, "job_province_share.csv")
+    jp_xlsx = os.path.join(base_path, "job_province_share.xlsx")
+
+    try:
+        jp = None
+        if os.path.exists(jp_csv):
+            jp = pd.read_csv(jp_csv)
+        elif os.path.exists(jp_xlsx):
+            jp = pd.read_excel(jp_xlsx)
+
+        if jp is not None and not jp.empty:
+            cols = {c.lower().strip(): c for c in jp.columns}
+            noc_col = cols.get("noc") or cols.get("code") or list(jp.columns)[0]
+            prov_col = cols.get("province") or cols.get("prov") or list(jp.columns)[1]
+            share_col = (
+                cols.get("share")
+                or cols.get("share_in_job_province")
+                or cols.get("pct")
+                or list(jp.columns)[2]
+            )
+
+            jp[noc_col] = _norm(jp[noc_col])
+            jp[prov_col] = jp[prov_col].astype(str).str.strip()
+            jp = jp[[noc_col, prov_col, share_col]].rename(
+                columns={noc_col: "noc", prov_col: "province", share_col: "share"}
+            )
+            jobprov_df = jp
+    except Exception:
+        jobprov_df = pd.DataFrame()
 
     # Create mappings
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
@@ -57,24 +94,43 @@ def load_data():
     mean_val, std_val = flat_scores.mean(), flat_scores.std()
     standardized_df = (similarity_df - mean_val) / std_val
 
-    # Return ROA mapping too
-    return similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa
+    # Return all data objects
+    return (
+        similarity_df,
+        standardized_df,
+        code_to_title,
+        title_to_code,
+        code_to_wage,
+        code_to_roa,
+        jobprov_df,
+    )
 
-similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa = load_data()
+
+(
+    similarity_df,
+    standardized_df,
+    code_to_title,
+    title_to_code,
+    code_to_wage,
+    code_to_roa,
+    jobprov_df,
+) = load_data()
 
 # ---------- Helper Functions ----------
+
 
 def get_education_level(noc_code):
     """
     Extract the 'education required' level from the 5-digit NOC.
-    By your convention, this is the thousands digit, e.g. 14110 -> 4.
-    That is the SECOND digit of the 5-digit code string.
+    By your convention, this is the thousands digit, e.g. 14110 -> 4,
+    i.e. the SECOND digit of the 5-digit code string.
     """
     try:
         s = str(noc_code).zfill(5)
         return int(s[1])
     except Exception:
         return None
+
 
 def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
@@ -98,11 +154,14 @@ def get_most_and_least_similar(code, n=5):
 
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                   for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
-                      for occ, score in bottom_matches.items()]
+    top_results = [
+        (occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()
+    ]
+    bottom_results = [
+        (occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()
+    ]
     return top_results, bottom_results, scores
+
 
 def compare_two_jobs(code1, code2):
     if code1 not in similarity_df.index or code2 not in similarity_df.index:
@@ -121,6 +180,7 @@ def compare_two_jobs(code1, code2):
         return None
     return score, rank, total
 
+
 # ---- Training multiplier based on |z| bins ----
 def training_multiplier(z_score):
     z = abs(z_score)
@@ -133,8 +193,37 @@ def training_multiplier(z_score):
     else:
         return 2.0
 
+
+# ---- Geographic cost helper (optional) ----
+def geographic_cost(dest_code, province, C_move=20000.0):
+    """
+    Expected relocation cost for moving into dest_code from given province.
+    Uses jobprov_df (share of workers in each province for that occupation).
+    If no data, returns 0.
+    """
+    if province is None:
+        return 0.0
+    if jobprov_df is None or jobprov_df.empty:
+        return 0.0
+
+    sub = jobprov_df[jobprov_df["noc"] == dest_code]
+    if sub.empty:
+        return 0.0
+
+    a_p0 = float(sub.loc[sub["province"] == province, "share"].sum())
+    a_max = float(sub["share"].max())
+    if a_max <= 0:
+        return 0.0
+
+    # Probability of having to move: 1 - (local share / max share)
+    p_move = 1.0 - a_p0 / a_max
+    p_move = max(0.0, min(1.0, p_move))  # clamp
+
+    return C_move * p_move
+
+
 # ---- Calibration for risky -> safe-haven only (NO education restriction here) ----
-def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14, alpha=1.2):
+def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs
     (across all education levels) equals target_usd.
@@ -156,7 +245,7 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14
                 continue
             base = 2 * np.sqrt(code_to_wage[r] * code_to_wage[s])
             mult = training_multiplier(z)
-            raw_cost = base * (1 + beta * abs(z)**alpha) * mult
+            raw_cost = base * (1 + beta * abs(z) ** alpha) * mult
             pairs.append(raw_cost)
 
     if not pairs:
@@ -166,11 +255,13 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14
         return 1.0, 0
     return target_usd / mean_raw, len(pairs)
 
+
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """
-    Cost = k * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]
-    Calibration k is ALWAYS applied.
-    Only computed for pairs whose education levels differ by at most EDU_GAP.
+    Cost = k * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]  +  λ * GeoCost
+    - Calibration k is ALWAYS applied to the skill/training component.
+    - Only computed for pairs whose education levels differ by at most EDU_GAP.
+    - Geographic component is optional (controlled by USE_GEO and sidebar params).
     """
     level1 = get_education_level(code1)
     level2 = get_education_level(code2)
@@ -194,8 +285,15 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
 
     base_cost = 2 * np.sqrt(w_origin * w_dest)
     multiplier = training_multiplier(z_score)
-    raw_cost = base_cost * (1 + beta * abs(z_score)**alpha) * multiplier
-    return CALIB_K * raw_cost  # always calibrated
+    skill_cost = CALIB_K * base_cost * (1 + beta * abs(z_score) ** alpha) * multiplier
+
+    # Optional geographic mobility cost
+    if USE_GEO:
+        geo_cost = geographic_cost(code2, USER_PROVINCE, GEO_C_MOVE)
+        return skill_cost + GEO_LAMBDA * geo_cost
+    else:
+        return skill_cost
+
 
 def plot_histogram(scores, highlight_score=None):
     hist_df = pd.DataFrame({"score": scores.values})
@@ -205,7 +303,7 @@ def plot_histogram(scores, highlight_score=None):
         .encode(
             alt.X("score:Q", bin=alt.Bin(maxbins=30), title="Similarity Score (Euclidean distance)"),
             alt.Y("count()", title="Number of Occupations"),
-            tooltip=["count()"]
+            tooltip=["count()"],
         )
         .properties(width=600, height=400)
     )
@@ -217,6 +315,7 @@ def plot_histogram(scores, highlight_score=None):
         )
         hist_chart = hist_chart + line
     return hist_chart
+
 
 # ---- Switching cost distribution helpers ----
 def compute_switching_costs_from_origin(origin_code, beta, alpha):
@@ -233,17 +332,24 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
             continue
         cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha)
         if pd.notnull(cost):
-            rows.append({
-                "code": dest,
-                "title": code_to_title.get(dest, "Unknown Title"),
-                "cost": float(cost)
-            })
+            rows.append(
+                {
+                    "code": dest,
+                    "title": code_to_title.get(dest, "Unknown Title"),
+                    "cost": float(cost),
+                }
+            )
     return pd.DataFrame(rows)
+
 
 def plot_cost_histogram(cost_df):
     if cost_df.empty:
-        return alt.Chart(pd.DataFrame({"cost":[0]})).mark_bar().encode(
-            alt.X("cost:Q", bin=alt.Bin(maxbins=1), title="Switching Cost ($)")
+        return (
+            alt.Chart(pd.DataFrame({"cost": [0]}))
+            .mark_bar()
+            .encode(
+                alt.X("cost:Q", bin=alt.Bin(maxbins=1), title="Switching Cost ($)"),
+            )
         )
     chart = (
         alt.Chart(cost_df)
@@ -251,25 +357,36 @@ def plot_cost_histogram(cost_df):
         .encode(
             alt.X("cost:Q", bin=alt.Bin(maxbins=30), title="Switching Cost ($)"),
             alt.Y("count()", title="Number of Occupations"),
-            tooltip=["count()"]
+            tooltip=["count()"],
         )
         .properties(width=600, height=400)
     )
     return chart
 
+
 # ---------- Risky/Safe sets & calibration ----------
-RISKY_THRESHOLD = 0.70   # ROA >= 0.70 → risky
-SAFE_THRESHOLD = 0.70    # ROA < 0.70 → safe
+RISKY_THRESHOLD = 0.70  # ROA >= 0.70 → risky
+SAFE_THRESHOLD = 0.70  # ROA < 0.70 → safe
 
 available_nocs = set(similarity_df.index) & set(code_to_wage.keys())
 if code_to_roa:
-    RISKY_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] >= RISKY_THRESHOLD}
-    SAFE_CODES  = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] <  SAFE_THRESHOLD}
+    RISKY_CODES = {
+        noc
+        for noc in available_nocs
+        if code_to_roa.get(noc) is not None and code_to_roa[noc] >= RISKY_THRESHOLD
+    }
+    SAFE_CODES = {
+        noc
+        for noc in available_nocs
+        if code_to_roa.get(noc) is not None and code_to_roa[noc] < SAFE_THRESHOLD
+    }
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
 # Calibrate k on ALL risky->safe pairs (no education restriction here)
-CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
+CALIB_K, CALIB_PAIRS = compute_calibration_k(
+    RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2
+)
 
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="APOLLO", layout="wide")
@@ -277,8 +394,12 @@ st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour 
 
 # Sidebar sliders for beta and alpha
 st.sidebar.subheader("Switching Cost Parameters")
-beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
-alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
+beta = st.sidebar.slider(
+    "Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01
+)
+alpha = st.sidebar.slider(
+    "Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1
+)
 
 # Sidebar slider for education distance
 EDU_GAP = st.sidebar.slider(
@@ -289,6 +410,34 @@ EDU_GAP = st.sidebar.slider(
     step=1,
 )
 
+# Optional geographic cost controls
+USE_GEO = st.sidebar.checkbox("Include geographic mobility cost", value=False)
+
+USER_PROVINCE = None
+GEO_C_MOVE = 0.0
+GEO_LAMBDA = 0.0
+
+if USE_GEO:
+    if jobprov_df is not None and not jobprov_df.empty:
+        province_options = sorted(jobprov_df["province"].dropna().unique())
+        USER_PROVINCE = st.sidebar.selectbox(
+            "Worker's province of origin:", province_options
+        )
+        GEO_C_MOVE = st.sidebar.number_input(
+            "Relocation cost if move required ($)",
+            min_value=0.0,
+            value=20000.0,
+            step=1000.0,
+        )
+        GEO_LAMBDA = st.sidebar.slider(
+            "Weight on geographic cost (λ)", min_value=0.0, max_value=1.0, value=0.5, step=0.1
+        )
+    else:
+        st.sidebar.info(
+            "Geographic cost selected, but no job_province_share file found. "
+            "Geographic component will be treated as zero."
+        )
+
 # Status block to verify calibration & ROA ingestion
 with st.sidebar.expander("Calibration status", expanded=False):
     st.markdown(
@@ -298,6 +447,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
 - **Risky→Safe pairs used for k:** {CALIB_PAIRS}
 - **Calibration k (always applied):** {CALIB_K:.3f}
+- **Geo data loaded:** {'Yes' if (jobprov_df is not None and not jobprov_df.empty) else 'No'}
 """
     )
 
@@ -311,27 +461,39 @@ with st.expander("Methodology"):
   regardless of education level.  
 - When displaying results, switching costs are computed only between occupations whose education levels  
   (thousands digit of the 5-digit NOC) are within a chosen **maximum distance** (set by the sidebar slider).  
-- The cost combines the geometric mean of origin/destination wages, a non-linear skill-distance term,  
+- The baseline switching cost combines the geometric mean of origin/destination wages, a non-linear skill-distance term,  
   a training-intensity multiplier based on standardized |z| bins, and the calibration factor **k**.  
         """
     )
-    st.latex(r"""
-\text{SwitchingCost}
+    st.latex(
+        r"""
+\text{SkillCost}
 = k \cdot \left(2\,\sqrt{w_o\,w_d}\right)
   \cdot \left(1 + \beta\,|z|^{\alpha}\right)
   \cdot m(|z|)
-""")
+"""
+    )
     st.markdown(
         r"""
 - Here, \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \), and \( k \) is chosen so that the **average risky → safe** transition cost  
   (across all education levels) is about **$24,000**.  
-- Adjust \( \beta \), \( \alpha \), and the maximum education distance in the sidebar to see sensitivity.  
+- Optionally, a **geographic mobility cost** is added:  
+  \[
+    \text{TotalCost} = \text{SkillCost} + \lambda \cdot \text{GeoCost},
+  \]
+  where \( \lambda \in [0,1] \) and GeoCost reflects the expected relocation cost given the origin province  
+  and the spatial distribution of the destination occupation.  
+- Adjust \( \beta \), \( \alpha \), the maximum education distance, and the geographic cost settings in the sidebar to see sensitivity.  
         """
     )
 
 # Sidebar
-n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+n_results = st.sidebar.slider(
+    "Number of results to show:", min_value=3, max_value=20, value=5
+)
+menu = st.sidebar.radio(
+    "Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"]
+)
 
 # ---- Look up by code ----
 if menu == "Look up by code":
@@ -339,29 +501,59 @@ if menu == "Look up by code":
     if code:
         code = str(code).zfill(5).strip()
         if code in similarity_df.index:
-            top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
+            top_results, bottom_results, all_scores = get_most_and_least_similar(
+                code, n=n_results
+            )
 
             # Most similar
-            st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
-            df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-            st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
+            st.subheader(
+                f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}"
+            )
+            df_top = pd.DataFrame(
+                top_results, columns=["Code", "Title", "Similarity Score"]
+            )
+            df_top["Switching Cost ($)"] = df_top["Code"].apply(
+                lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha)
+            )
+            df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(
+                lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A"
+            )
+            st.dataframe(
+                df_top,
+                use_container_width=True,
+                column_config={"Title": st.column_config.Column(width="large")},
+            )
 
             # Least similar
-            st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
-            df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
-            df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-            st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
+            st.subheader(
+                f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}"
+            )
+            df_bottom = pd.DataFrame(
+                bottom_results, columns=["Code", "Title", "Similarity Score"]
+            )
+            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(
+                lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha)
+            )
+            df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(
+                lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A"
+            )
+            st.dataframe(
+                df_bottom,
+                use_container_width=True,
+                column_config={"Title": st.column_config.Column(width="large")},
+            )
 
             # Similarity histogram (under current education gap)
-            st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
+            st.subheader(
+                f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}"
+            )
             st.altair_chart(plot_histogram(all_scores), use_container_width=True)
 
             # Switching cost histogram (under current education gap)
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
-            st.subheader(f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}")
+            st.subheader(
+                f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}"
+            )
             st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
 
 # ---- Look up by title ----
@@ -372,29 +564,65 @@ elif menu == "Look up by title":
     selected_item = st.selectbox("Select an occupation:", sorted(title_options))
     if selected_item:
         selected_code, selected_title = selected_item.split(" – ")
-        top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
+        top_results, bottom_results, all_scores = get_most_and_least_similar(
+            selected_code, n=n_results
+        )
 
         # Most similar
-        st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
-        df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-        df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
-        df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-        st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
+        st.subheader(
+            f"Most Similar Occupations for {selected_code} – {selected_title}"
+        )
+        df_top = pd.DataFrame(
+            top_results, columns=["Code", "Title", "Similarity Score"]
+        )
+        df_top["Switching Cost ($)"] = df_top["Code"].apply(
+            lambda x: calculate_switching_cost(
+                selected_code, x, beta=beta, alpha=alpha
+            )
+        )
+        df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(
+            lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A"
+        )
+        st.dataframe(
+            df_top,
+            use_container_width=True,
+            column_config={"Title": st.column_config.Column(width="large")},
+        )
 
         # Least similar
-        st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
-        df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
-        df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
-        st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
+        st.subheader(
+            f"Least Similar Occupations for {selected_code} – {selected_title}"
+        )
+        df_bottom = pd.DataFrame(
+            bottom_results, columns=["Code", "Title", "Similarity Score"]
+        )
+        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(
+            lambda x: calculate_switching_cost(
+                selected_code, x, beta=beta, alpha=alpha
+            )
+        )
+        df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(
+            lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A"
+        )
+        st.dataframe(
+            df_bottom,
+            use_container_width=True,
+            column_config={"Title": st.column_config.Column(width="large")},
+        )
 
         # Similarity histogram
-        st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
+        st.subheader(
+            f"Similarity Score Distribution for {selected_code} – {selected_title}"
+        )
         st.altair_chart(plot_histogram(all_scores), use_container_width=True)
 
         # Switching cost histogram
-        costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha)
-        st.subheader(f"Switching Cost Distribution from {selected_code} – {selected_title}")
+        costs_df = compute_switching_costs_from_origin(
+            selected_code, beta=beta, alpha=alpha
+        )
+        st.subheader(
+            f"Switching Cost Distribution from {selected_code} – {selected_title}"
+        )
         st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
 
 # ---- Compare two jobs ----
@@ -402,8 +630,12 @@ elif menu == "Compare two jobs":
     available_codes = [code for code in code_to_title if code in similarity_df.index]
     title_options = [f"{code} – {code_to_title[code]}" for code in available_codes]
 
-    job1_item = st.selectbox("Select first occupation:", sorted(title_options), key="job1")
-    job2_item = st.selectbox("Select second occupation:", sorted(title_options), key="job2")
+    job1_item = st.selectbox(
+        "Select first occupation:", sorted(title_options), key="job1"
+    )
+    job2_item = st.selectbox(
+        "Select second occupation:", sorted(title_options), key="job2"
+    )
 
     job1_code, job1_title = job1_item.split(" – ")
     job2_code, job2_title = job2_item.split(" – ")
@@ -412,7 +644,9 @@ elif menu == "Compare two jobs":
         result = compare_two_jobs(job1_code, job2_code)
         if result:
             score, rank, total = result
-            cost = calculate_switching_cost(job1_code, job2_code, beta=beta, alpha=alpha)
+            cost = calculate_switching_cost(
+                job1_code, job2_code, beta=beta, alpha=alpha
+            )
 
             st.success(
                 f"**Comparison Result:**\n\n"
@@ -423,9 +657,12 @@ elif menu == "Compare two jobs":
             )
 
             if cost is not None:
+                extra_geo = ""
+                if USE_GEO and USER_PROVINCE is not None:
+                    extra_geo = f" (includes geographic mobility component for {USER_PROVINCE})"
                 st.info(
                     f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                    f"`${cost:,.2f}` (education distance ≤ {EDU_GAP})"
+                    f"`${cost:,.2f}` (education distance ≤ {EDU_GAP}){extra_geo}"
                 )
             else:
                 st.info(
