@@ -63,10 +63,39 @@ def load_data():
 similarity_df, standardized_df, code_to_title, title_to_code, code_to_wage, code_to_roa = load_data()
 
 # ---------- Helper Functions ----------
+
+def get_education_level(noc_code):
+    """
+    Extract the 'education required' level from the 5-digit NOC.
+    By your convention, this is the thousands digit, e.g. 14110 -> 4.
+    That is the SECOND digit of the 5-digit code string.
+    """
+    try:
+        s = str(noc_code).zfill(5)
+        return int(s[1])
+    except Exception:
+        return None
+
 def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
         return None, None, None
+    origin_level = get_education_level(code)
+
+    # All scores from origin, drop self and NaNs
     scores = similarity_df.loc[code].drop(code).dropna()
+
+    # Restrict by max education distance (uses global EDU_GAP set later)
+    same_or_close_codes = []
+    for c in scores.index:
+        lev = get_education_level(c)
+        if origin_level is not None and lev is not None:
+            if abs(lev - origin_level) <= EDU_GAP:
+                same_or_close_codes.append(c)
+    scores = scores.loc[same_or_close_codes] if same_or_close_codes else scores.iloc[0:0]
+
+    if scores.empty:
+        return [], [], scores  # no valid matches under current education gap
+
     top_matches = scores.nsmallest(n)
     bottom_matches = scores.nlargest(n)
     top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) 
@@ -107,15 +136,22 @@ def training_multiplier(z_score):
 # ---- Calibration for risky -> safe-haven only ----
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
-    Compute a global scale k so that the average cost for risky->safe pairs equals target_usd.
+    Compute a global scale k so that the average cost for risky->safe pairs
+    (within the same education level) equals target_usd.
     Returns (k, n_pairs_used).
     """
     pairs = []
     for r in risky_codes:
         if r not in standardized_df.index:
             continue
+        level_r = get_education_level(r)
+        if level_r is None:
+            continue
         for s in safe_codes:
             if s == r or s not in standardized_df.index:
+                continue
+            # Calibration: keep it anchored on same-education transitions only
+            if get_education_level(s) != level_r:
                 continue
             if (code_to_wage.get(r) is None) or (code_to_wage.get(s) is None):
                 continue
@@ -140,7 +176,16 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """
     Cost = k * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]
     Calibration k is ALWAYS applied.
+    Only computed for pairs whose education levels differ by at most EDU_GAP.
     """
+    level1 = get_education_level(code1)
+    level2 = get_education_level(code2)
+    if level1 is None or level2 is None:
+        return None
+    # Enforce max education distance requirement (EDU_GAP is global set from slider)
+    if abs(level1 - level2) > EDU_GAP:
+        return None
+
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
         return None
     z_score = standardized_df.loc[code1, code2]
@@ -182,8 +227,15 @@ def plot_histogram(scores, highlight_score=None):
 # ---- Switching cost distribution helpers ----
 def compute_switching_costs_from_origin(origin_code, beta, alpha):
     rows = []
+    origin_level = get_education_level(origin_code)
     for dest in similarity_df.columns:
         if dest == origin_code:
+            continue
+        lev = get_education_level(dest)
+        if origin_level is None or lev is None:
+            continue
+        # Restrict by allowed education distance
+        if abs(lev - origin_level) > EDU_GAP:
             continue
         cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha)
         if pd.notnull(cost):
@@ -222,7 +274,8 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
+# Calibration is independent of EDU_GAP (still same-education risky→safe)
+CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="APOLLO", layout="wide")
@@ -233,6 +286,15 @@ st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
+# NEW: Sidebar slider for education distance
+EDU_GAP = st.sidebar.slider(
+    "Max education distance allowed (0 = same level only)",
+    min_value=0,
+    max_value=4,
+    value=0,
+    step=1,
+)
+
 # Status block to verify calibration & ROA ingestion
 with st.sidebar.expander("Calibration status", expanded=False):
     st.markdown(
@@ -240,7 +302,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **ROA records loaded:** {'Yes' if code_to_roa else 'No'}
 - **Risky codes (ROA ≥ 0.70):** {len(RISKY_CODES)}
 - **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
-- **Risky→Safe pairs used:** {CALIB_PAIRS}
+- **Risky→Safe pairs used (same education only):** {CALIB_PAIRS}
 - **Calibration k (always applied):** {CALIB_K:.3f}
 """
     )
@@ -251,7 +313,9 @@ with st.expander("Methodology"):
         """
 - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
   Smaller scores mean occupations are more similar.  
-- Switching costs combine the geometric mean of origin/destination wages, a non-linear skill-distance term,  
+- By default, switching costs are computed only between occupations whose education levels (thousands digit of the 5-digit NOC)  
+  are within a chosen **maximum distance** (set by the sidebar slider).  
+- The cost combines the geometric mean of origin/destination wages, a non-linear skill-distance term,  
   a training-intensity multiplier based on standardized |z| bins, and a global calibration factor **k**.  
         """
     )
@@ -263,12 +327,11 @@ with st.expander("Methodology"):
 """)
     st.markdown(
         r"""
-- Here, \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \), and \( k \) is chosen so that the **average risky → safe** transition cost is about **$24,000**.  
-- Adjust \( \beta \) and \( \alpha \) in the sidebar to see sensitivity.  
+- Here, \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \), and \( k \) is chosen so that the **average risky → safe** transition cost  
+  (within the same education group) is about **$24,000**.  
+- Adjust \( \beta \), \( \alpha \), and the maximum education distance in the sidebar to see sensitivity.  
         """
     )
-
-
 
 # Sidebar
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
@@ -296,11 +359,11 @@ if menu == "Look up by code":
             df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
-            # Similarity histogram
+            # Similarity histogram (under current education gap)
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
             st.altair_chart(plot_histogram(all_scores), use_container_width=True)
 
-            # Switching cost histogram
+            # Switching cost histogram (under current education gap)
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
             st.subheader(f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}")
             st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
@@ -366,7 +429,12 @@ elif menu == "Compare two jobs":
             if cost is not None:
                 st.info(
                     f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                    f"`${cost:,.2f}` "
+                    f"`${cost:,.2f}` (education distance ≤ {EDU_GAP})"
+                )
+            else:
+                st.info(
+                    "ℹ️ Switching cost is not reported because the two occupations are further apart in education "
+                    f"than the allowed maximum distance ({EDU_GAP})."
                 )
         else:
             st.error("❌ Could not compare occupations.")
