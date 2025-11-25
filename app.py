@@ -133,25 +133,19 @@ def training_multiplier(z_score):
     else:
         return 2.0
 
-# ---- Calibration for risky -> safe-haven only ----
+# ---- Calibration for risky -> safe-haven only (NO education restriction here) ----
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs
-    (within the same education level) equals target_usd.
+    (across all education levels) equals target_usd.
     Returns (k, n_pairs_used).
     """
     pairs = []
     for r in risky_codes:
         if r not in standardized_df.index:
             continue
-        level_r = get_education_level(r)
-        if level_r is None:
-            continue
         for s in safe_codes:
             if s == r or s not in standardized_df.index:
-                continue
-            # Calibration: keep it anchored on same-education transitions only
-            if get_education_level(s) != level_r:
                 continue
             if (code_to_wage.get(r) is None) or (code_to_wage.get(s) is None):
                 continue
@@ -274,7 +268,7 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-# Calibration is independent of EDU_GAP (still same-education risky→safe)
+# Calibrate k on ALL risky->safe pairs (no education restriction here)
 CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
@@ -286,7 +280,7 @@ st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
-# NEW: Sidebar slider for education distance
+# Sidebar slider for education distance
 EDU_GAP = st.sidebar.slider(
     "Max education distance allowed (0 = same level only)",
     min_value=0,
@@ -302,7 +296,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **ROA records loaded:** {'Yes' if code_to_roa else 'No'}
 - **Risky codes (ROA ≥ 0.70):** {len(RISKY_CODES)}
 - **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
-- **Risky→Safe pairs used (same education only):** {CALIB_PAIRS}
+- **Risky→Safe pairs used for k:** {CALIB_PAIRS}
 - **Calibration k (always applied):** {CALIB_K:.3f}
 """
     )
@@ -313,10 +307,12 @@ with st.expander("Methodology"):
         """
 - Similarity scores are based on Euclidean distances of O*NET skill, ability, and knowledge vectors.  
   Smaller scores mean occupations are more similar.  
-- By default, switching costs are computed only between occupations whose education levels (thousands digit of the 5-digit NOC)  
-  are within a chosen **maximum distance** (set by the sidebar slider).  
+- The global calibration factor **k** is estimated using **all risky → safe** occupational transitions,  
+  regardless of education level.  
+- When displaying results, switching costs are computed only between occupations whose education levels  
+  (thousands digit of the 5-digit NOC) are within a chosen **maximum distance** (set by the sidebar slider).  
 - The cost combines the geometric mean of origin/destination wages, a non-linear skill-distance term,  
-  a training-intensity multiplier based on standardized |z| bins, and a global calibration factor **k**.  
+  a training-intensity multiplier based on standardized |z| bins, and the calibration factor **k**.  
         """
     )
     st.latex(r"""
@@ -328,7 +324,7 @@ with st.expander("Methodology"):
     st.markdown(
         r"""
 - Here, \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \), and \( k \) is chosen so that the **average risky → safe** transition cost  
-  (within the same education group) is about **$24,000**.  
+  (across all education levels) is about **$24,000**.  
 - Adjust \( \beta \), \( \alpha \), and the maximum education distance in the sidebar to see sensitivity.  
         """
     )
