@@ -54,7 +54,8 @@ def load_data():
         code_to_roa = {}
 
     # ---- Load job-by-province share data (optional) ----
-    jobprov_df = pd.DataFrame()
+    jobprov_df = pd.DataFrame()  # ensure it's always defined
+
     jp_csv = os.path.join(base_path, "job_province_share.csv")
     jp_xlsx = os.path.join(base_path, "job_province_share.xlsx")
 
@@ -83,7 +84,7 @@ def load_data():
             )
             jobprov_df = jp
     except Exception:
-        jobprov_df = pd.DataFrame()
+        jobprov_df = pd.DataFrame()  # fallback
 
     # Create mappings
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
@@ -94,7 +95,7 @@ def load_data():
     mean_val, std_val = flat_scores.mean(), flat_scores.std()
     standardized_df = (similarity_df - mean_val) / std_val
 
-    # Return all data objects
+    # Return all data objects (ALWAYS 7 values)
     return (
         similarity_df,
         standardized_df,
@@ -117,7 +118,6 @@ def load_data():
 ) = load_data()
 
 # ---------- Helper Functions ----------
-
 
 def get_education_level(noc_code):
     """
