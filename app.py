@@ -269,7 +269,7 @@ else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
 # Calibrate k on ALL risky->safe pairs (no education restriction here)
-CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
+CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
 st.set_page_config(page_title="APOLLO", layout="wide")
