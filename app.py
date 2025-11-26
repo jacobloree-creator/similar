@@ -223,7 +223,7 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 
 
 # ---- Calibration for risky -> safe-haven only (NO education restriction here) ----
-def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
+def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs
     (across all education levels) equals target_usd.
@@ -385,7 +385,7 @@ else:
 
 # Calibrate k on ALL risky->safe pairs (no education restriction here)
 CALIB_K, CALIB_PAIRS = compute_calibration_k(
-    RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2
+    RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2
 )
 
 # ---------- Streamlit App ----------
