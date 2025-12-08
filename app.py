@@ -374,13 +374,28 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
     Build a small directed ego-network around origin_code using the lowest-cost
     destinations under current settings, and display it with pyvis.
     """
+    # 1. Get all valid switching costs from this origin
     df_costs = compute_switching_costs_from_origin(origin_code, beta, alpha)
+
+    # Debug info in the UI so we can see what's going on
+    st.markdown(f"**Ego-network debug:** found {len(df_costs)} valid destinations under current settings.")
     if df_costs.empty:
-        st.info("Not enough valid transitions to build a network graph under current settings.")
+        st.info(
+            "Not enough valid transitions to build a network graph.\n\n"
+            "- Try increasing the max education distance (EDU_GAP) in the sidebar.\n"
+            "- Check that wages exist for destination occupations.\n"
+            "- Check that switching costs are not all filtered out."
+        )
         return
 
+    # 2. Keep only the lowest-cost neighbors
     df_costs = df_costs.sort_values("cost").head(max_neighbors)
 
+    # Show the table we are actually using for the network
+    st.markdown("Top destinations used for the network:")
+    st.dataframe(df_costs[["code", "title", "cost"]])
+
+    # 3. Build a directed graph
     G = nx.DiGraph()
 
     def node_attrs(code):
@@ -408,9 +423,10 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
     for _, row in df_costs.iterrows():
         dest = row["code"]
         G.add_node(dest, **node_attrs(dest))
-        cost = row["cost"]
-        G.add_edge(origin_code, dest, title=f"Cost: {cost:,.0f}", value=float(cost))
+        cost_val = float(row["cost"])
+        G.add_edge(origin_code, dest, title=f"Cost: {cost_val:,.0f}", value=cost_val)
 
+    # 4. Build pyvis network
     net = Network(
         height="600px",
         width="100%",
@@ -419,14 +435,12 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
         directed=True,
     )
     net.from_nx(G)
+
+    # Layout tuning (you can tweak these)
     net.repulsion(node_distance=180, spring_length=200, damping=0.85)
 
-    tmp_dir = tempfile.gettempdir()
-    html_path = os.path.join(tmp_dir, f"network_{origin_code}.html")
-    net.show(html_path)
-
-    with open(html_path, "r", encoding="utf-8") as f:
-        html = f.read()
+    # 5. Generate HTML and embed directly (no temp files needed)
+    html = net.generate_html()
     components.html(html, height=600, scrolling=True)
 
 
