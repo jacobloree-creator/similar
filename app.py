@@ -3,6 +3,10 @@ import pandas as pd
 import os
 import altair as alt
 import numpy as np
+import networkx as nx
+from pyvis.network import Network
+import streamlit.components.v1 as components
+import tempfile
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -223,7 +227,7 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 
 
 # ---- Calibration for risky -> safe-haven only (NO education restriction here) ----
-def compute_calibration_k(risky_codes, safe_codes, target_usd=20000.0, beta=0.14, alpha=1.2):
+def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Compute a global scale k so that the average cost for risky->safe pairs
     (across all education levels) equals target_usd.
@@ -364,6 +368,68 @@ def plot_cost_histogram(cost_df):
     return chart
 
 
+# ---- Career path ego-network helper ----
+def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
+    """
+    Build a small directed ego-network around origin_code using the lowest-cost
+    destinations under current settings, and display it with pyvis.
+    """
+    df_costs = compute_switching_costs_from_origin(origin_code, beta, alpha)
+    if df_costs.empty:
+        st.info("Not enough valid transitions to build a network graph under current settings.")
+        return
+
+    df_costs = df_costs.sort_values("cost").head(max_neighbors)
+
+    G = nx.DiGraph()
+
+    def node_attrs(code):
+        title = code_to_title.get(code, "Unknown")
+        roa = code_to_roa.get(code)
+        if roa is None:
+            color = "#999999"
+        elif roa >= RISKY_THRESHOLD:
+            color = "#d62728"  # red-ish for risky
+        else:
+            color = "#1f77b4"  # blue-ish for safe
+        wage = code_to_wage.get(code)
+        label = f"{code}\n{title[:30]}"
+        tooltip = f"{code} – {title}"
+        if wage is not None:
+            tooltip += f"<br>Wage: {wage:,.0f}"
+        if roa is not None:
+            tooltip += f"<br>Automation risk: {roa:.2f}"
+        return dict(label=label, title=tooltip, color=color)
+
+    # Add origin node
+    G.add_node(origin_code, **node_attrs(origin_code))
+
+    # Add destination nodes and edges
+    for _, row in df_costs.iterrows():
+        dest = row["code"]
+        G.add_node(dest, **node_attrs(dest))
+        cost = row["cost"]
+        G.add_edge(origin_code, dest, title=f"Cost: {cost:,.0f}", value=float(cost))
+
+    net = Network(
+        height="600px",
+        width="100%",
+        bgcolor="#ffffff",
+        font_color="#000000",
+        directed=True,
+    )
+    net.from_nx(G)
+    net.repulsion(node_distance=180, spring_length=200, damping=0.85)
+
+    tmp_dir = tempfile.gettempdir()
+    html_path = os.path.join(tmp_dir, f"network_{origin_code}.html")
+    net.show(html_path)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    components.html(html, height=600, scrolling=True)
+
+
 # ---------- Risky/Safe sets & calibration ----------
 RISKY_THRESHOLD = 0.70  # ROA >= 0.70 → risky
 SAFE_THRESHOLD = 0.70  # ROA < 0.70 → safe
@@ -385,7 +451,7 @@ else:
 
 # Calibrate k on ALL risky->safe pairs (no education restriction here)
 CALIB_K, CALIB_PAIRS = compute_calibration_k(
-    RISKY_CODES, SAFE_CODES, target_usd=20000.0, beta=0.14, alpha=1.2
+    RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2
 )
 
 # ---------- Streamlit App ----------
@@ -556,6 +622,10 @@ if menu == "Look up by code":
             )
             st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
 
+            # Career path ego-network
+            with st.expander("Career path network (local view)", expanded=False):
+                build_and_show_ego_network(code, beta, alpha, max_neighbors=15)
+
 # ---- Look up by title ----
 elif menu == "Look up by title":
     available_codes = [code for code in code_to_title if code in similarity_df.index]
@@ -624,6 +694,10 @@ elif menu == "Look up by title":
             f"Switching Cost Distribution from {selected_code} – {selected_title}"
         )
         st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
+
+        # Career path ego-network
+        with st.expander("Career path network (local view)", expanded=False):
+            build_and_show_ego_network(selected_code, beta, alpha, max_neighbors=15)
 
 # ---- Compare two jobs ----
 elif menu == "Compare two jobs":
