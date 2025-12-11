@@ -6,7 +6,6 @@ import numpy as np
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
-import tempfile
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -361,19 +360,18 @@ def plot_cost_histogram(cost_df):
         .encode(
             alt.X("cost:Q", bin=alt.Bin(maxbins=30), title="Switching Cost ($)"),
             alt.Y("count()", title="Number of Occupations"),
-            tooltip=["count()"],
+            tooltip=["count()", "cost:Q"],
         )
         .properties(width=600, height=400)
     )
     return chart
 
 
-# ---- NEW: Interactive histograms with clickable bars ----
-def similarity_hist_with_table(all_scores):
+# ---- NEW: single-chart histograms with detailed tooltips ----
+def similarity_hist_with_titles(all_scores, maxbins=20, max_titles=40):
     """
-    Interactive similarity histogram:
-    - Top: histogram over similarity scores
-    - Bottom: list of occupations whose scores fall in the selected bin(s)
+    Build a similarity histogram where each bar's tooltip lists
+    the occupations (code + title) that fall into that bin.
     """
     if all_scores is None or len(all_scores) == 0:
         return plot_histogram(all_scores or pd.Series(dtype=float))
@@ -383,102 +381,105 @@ def similarity_hist_with_table(all_scores):
         "score": all_scores.values,
     })
     df["title"] = df["code"].map(lambda c: code_to_title.get(c, "Unknown Title"))
-    df["label"] = (
-        df["code"]
-        + " – "
-        + df["title"]
-        + " (score="
-        + df["score"].round(2).astype(str)
-        + ")"
-    )
+    df["label"] = df["code"] + " – " + df["title"]
 
-    # Brush selection along the x-axis (click or drag)
-    brush = alt.selection(type="interval", encodings=["x"])
+    # Pre-bin scores
+    edges = np.histogram_bin_edges(df["score"], bins=maxbins)
+    df["bin"] = pd.cut(df["score"], bins=edges, include_lowest=True)
 
-    hist = (
-        alt.Chart(df)
-        .mark_bar(opacity=0.7)
+    # Group by bin and build tooltip strings
+    grouped = df.groupby("bin")
+    rows = []
+    for iv, g in grouped:
+        if iv is pd.NA or iv is None:
+            continue
+        labels = g["label"].tolist()
+        extra = ""
+        if len(labels) > max_titles:
+            extra = f"; ... (+{len(labels) - max_titles} more)"
+            labels = labels[:max_titles]
+        titles_str = "; ".join(labels) + extra
+        rows.append({
+            "bin_start": float(iv.left),
+            "bin_end": float(iv.right),
+            "count": len(g),
+            "titles_str": titles_str,
+        })
+    bins_df = pd.DataFrame(rows)
+    if bins_df.empty:
+        return plot_histogram(all_scores)
+
+    chart = (
+        alt.Chart(bins_df)
+        .mark_bar(opacity=0.7, color="steelblue")
         .encode(
-            alt.X(
-                "score:Q",
-                bin=alt.Bin(maxbins=30),
-                title="Similarity Score (Euclidean distance)",
-            ),
-            alt.Y("count():Q", title="Number of Occupations"),
-            tooltip=["count():Q"],
+            x=alt.X("bin_start:Q", title="Similarity Score (Euclidean distance)"),
+            x2="bin_end:Q",
+            y=alt.Y("count:Q", title="Number of Occupations"),
+            tooltip=[
+                alt.Tooltip("count:Q", title="Number of occupations"),
+                alt.Tooltip("bin_start:Q", format=".2f", title="Score from"),
+                alt.Tooltip("bin_end:Q", format=".2f", title="Score to"),
+                alt.Tooltip("titles_str:N", title="Occupations in this bin"),
+            ],
         )
-        .add_selection(brush)
-        .properties(height=300)
+        .properties(width=600, height=400)
     )
-
-    # Table of occupations in the selected bin(s)
-    table = (
-        alt.Chart(df)
-        .transform_filter(brush)
-        .transform_window(row_number="row_number()")
-        .transform_filter("datum.row_number <= 50")  # cap at 50 rows for readability
-        .mark_text(align="left", baseline="top")
-        .encode(
-            y=alt.Y("row_number:O", axis=None),
-            text="label:N",
-        )
-        .properties(height=300)
-    )
-
-    return hist & table  # vertical concat
+    return chart
 
 
-def cost_hist_with_table(cost_df):
+def cost_hist_with_titles(cost_df, maxbins=20, max_titles=40):
     """
-    Interactive switching-cost histogram:
-    - Top: histogram over costs
-    - Bottom: list of occupations whose costs fall in the selected bin(s)
+    Build a switching-cost histogram where each bar's tooltip lists
+    the occupations (code + title) that fall into that cost bin.
     """
     if cost_df is None or cost_df.empty:
         return plot_cost_histogram(cost_df)
 
     df = cost_df.copy()
-    df["label"] = (
-        df["code"]
-        + " – "
-        + df["title"]
-        + " (cost=$"
-        + df["cost"].round(0).astype(int).astype(str)
-        + ")"
-    )
+    df["label"] = df["code"] + " – " + df["title"]
 
-    brush = alt.selection(type="interval", encodings=["x"])
+    edges = np.histogram_bin_edges(df["cost"], bins=maxbins)
+    df["bin"] = pd.cut(df["cost"], bins=edges, include_lowest=True)
 
-    hist = (
-        alt.Chart(df)
-        .mark_bar(opacity=0.7)
+    grouped = df.groupby("bin")
+    rows = []
+    for iv, g in grouped:
+        if iv is pd.NA or iv is None:
+            continue
+        labels = g["label"].tolist()
+        extra = ""
+        if len(labels) > max_titles:
+            extra = f"; ... (+{len(labels) - max_titles} more)"
+            labels = labels[:max_titles]
+        titles_str = "; ".join(labels) + extra
+        rows.append({
+            "bin_start": float(iv.left),
+            "bin_end": float(iv.right),
+            "count": len(g),
+            "titles_str": titles_str,
+        })
+    bins_df = pd.DataFrame(rows)
+    if bins_df.empty:
+        return plot_cost_histogram(cost_df)
+
+    chart = (
+        alt.Chart(bins_df)
+        .mark_bar(opacity=0.7, color="seagreen")
         .encode(
-            alt.X(
-                "cost:Q",
-                bin=alt.Bin(maxbins=30),
-                title="Switching Cost ($)",
-            ),
-            alt.Y("count():Q", title="Number of Occupations"),
-            tooltip=["count():Q"],
+            x=alt.X("bin_start:Q", title="Switching Cost ($)"),
+            x2="bin_end:Q",
+            y=alt.Y("count:Q", title="Number of Occupations"),
+            tooltip=[
+                alt.Tooltip("count:Q", title="Number of occupations"),
+                alt.Tooltip("bin_start:Q", format=",.0f", title="Cost from"),
+                alt.Tooltip("bin_end:Q", format=",.0f", title="Cost to"),
+                alt.Tooltip("titles_str:N", title="Occupations in this bin"),
+            ],
         )
-        .add_selection(brush)
-        .properties(height=300)
+        .properties(width=600, height=400)
     )
-
-    table = (
-        alt.Chart(df)
-        .transform_filter(brush)
-        .transform_window(row_number="row_number()")
-        .transform_filter("datum.row_number <= 50")
-        .mark_text(align="left", baseline="top")
-        .encode(
-            y=alt.Y("row_number:O", axis=None),
-            text="label:N",
-        )
-        .properties(height=300)
-    )
-
-    return hist & table
+    return chart
 
 
 # ---- Career path ego-network helper ----
@@ -733,20 +734,20 @@ if menu == "Look up by code":
                 column_config={"Title": st.column_config.Column(width="large")},
             )
 
-            # Similarity histogram + clickable list
+            # Similarity histogram with tooltips listing occupations
             st.subheader(
                 f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}"
             )
-            st.caption("Tip: click or drag on the bars to see which occupations fall into that score range below.")
-            st.altair_chart(similarity_hist_with_table(all_scores), use_container_width=True)
+            st.caption("Tip: hover or click on a bar to see which occupations fall in that similarity range.")
+            st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-            # Switching cost histogram + clickable list
+            # Switching cost histogram with tooltips listing occupations
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
             st.subheader(
                 f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}"
             )
-            st.caption("Tip: click or drag on the bars to see which occupations fall into that cost range below.")
-            st.altair_chart(cost_hist_with_table(costs_df), use_container_width=True)
+            st.caption("Tip: hover or click on a bar to see which occupations fall in that cost range.")
+            st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
 
             # Career path ego-network
             with st.expander("Career path network (local view)", expanded=False):
@@ -806,22 +807,22 @@ elif menu == "Look up by title":
             column_config={"Title": st.column_config.Column(width="large")},
         )
 
-        # Similarity histogram + clickable list
+        # Similarity histogram with tooltips
         st.subheader(
             f"Similarity Score Distribution for {selected_code} – {selected_title}"
         )
-        st.caption("Tip: click or drag on the bars to see which occupations fall into that score range below.")
-        st.altair_chart(similarity_hist_with_table(all_scores), use_container_width=True)
+        st.caption("Tip: hover or click on a bar to see which occupations fall in that similarity range.")
+        st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-        # Switching cost histogram + clickable list
+        # Switching cost histogram with tooltips
         costs_df = compute_switching_costs_from_origin(
             selected_code, beta=beta, alpha=alpha
         )
         st.subheader(
             f"Switching Cost Distribution from {selected_code} – {selected_title}"
         )
-        st.caption("Tip: click or drag on the bars to see which occupations fall into that cost range below.")
-        st.altair_chart(cost_hist_with_table(costs_df), use_container_width=True)
+        st.caption("Tip: hover or click on a bar to see which occupations fall in that cost range.")
+        st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
 
         # Career path ego-network
         with st.expander("Career path network (local view)", expanded=False):
