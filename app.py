@@ -368,10 +368,11 @@ def plot_cost_histogram(cost_df):
 
 
 # ---- NEW: single-chart histograms with detailed tooltips ----
-def similarity_hist_with_titles(all_scores, maxbins=20, max_titles=40):
+def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
     """
     Build a similarity histogram where each bar's tooltip lists
     the occupations (code + title) that fall into that bin.
+    Bars are drawn as proper rectangles; tooltips have line breaks.
     """
     if all_scores is None or len(all_scores) == 0:
         return plot_histogram(all_scores or pd.Series(dtype=float))
@@ -388,23 +389,24 @@ def similarity_hist_with_titles(all_scores, maxbins=20, max_titles=40):
     df["bin"] = pd.cut(df["score"], bins=edges, include_lowest=True)
 
     # Group by bin and build tooltip strings
-    grouped = df.groupby("bin")
     rows = []
-    for iv, g in grouped:
+    for iv, g in df.groupby("bin"):
         if iv is pd.NA or iv is None:
             continue
         labels = g["label"].tolist()
         extra = ""
         if len(labels) > max_titles:
-            extra = f"; ... (+{len(labels) - max_titles} more)"
+            extra = f"\n... (+{len(labels) - max_titles} more)"
             labels = labels[:max_titles]
-        titles_str = "; ".join(labels) + extra
+        # Use newline between occupations for a stacked tooltip
+        titles_str = "\n".join(labels) + extra
         rows.append({
             "bin_start": float(iv.left),
             "bin_end": float(iv.right),
             "count": len(g),
             "titles_str": titles_str,
         })
+
     bins_df = pd.DataFrame(rows)
     if bins_df.empty:
         return plot_histogram(all_scores)
@@ -428,10 +430,11 @@ def similarity_hist_with_titles(all_scores, maxbins=20, max_titles=40):
     return chart
 
 
-def cost_hist_with_titles(cost_df, maxbins=20, max_titles=40):
+def cost_hist_with_titles(cost_df, maxbins=12, max_titles=40):
     """
     Build a switching-cost histogram where each bar's tooltip lists
     the occupations (code + title) that fall into that cost bin.
+    Bars are drawn as rectangles; tooltips have line breaks.
     """
     if cost_df is None or cost_df.empty:
         return plot_cost_histogram(cost_df)
@@ -442,23 +445,23 @@ def cost_hist_with_titles(cost_df, maxbins=20, max_titles=40):
     edges = np.histogram_bin_edges(df["cost"], bins=maxbins)
     df["bin"] = pd.cut(df["cost"], bins=edges, include_lowest=True)
 
-    grouped = df.groupby("bin")
     rows = []
-    for iv, g in grouped:
+    for iv, g in df.groupby("bin"):
         if iv is pd.NA or iv is None:
             continue
         labels = g["label"].tolist()
         extra = ""
         if len(labels) > max_titles:
-            extra = f"; ... (+{len(labels) - max_titles} more)"
+            extra = f"\n... (+{len(labels) - max_titles} more)"
             labels = labels[:max_titles]
-        titles_str = "; ".join(labels) + extra
+        titles_str = "\n".join(labels) + extra
         rows.append({
             "bin_start": float(iv.left),
             "bin_end": float(iv.right),
             "count": len(g),
             "titles_str": titles_str,
         })
+
     bins_df = pd.DataFrame(rows)
     if bins_df.empty:
         return plot_cost_histogram(cost_df)
