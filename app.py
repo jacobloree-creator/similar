@@ -370,9 +370,9 @@ def plot_cost_histogram(cost_df):
 # ---- NEW: single-chart histograms with detailed tooltips ----
 def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
     """
-    Build a similarity histogram where each bar's tooltip lists
-    the occupations (code + title) that fall into that bin.
-    Bars are drawn as proper rectangles; tooltips have line breaks.
+    Similarity histogram where:
+    - Bars are proper rectangles (not hairline lines)
+    - Tooltip lists occupations (code + title) in that bin, one per line
     """
     if all_scores is None or len(all_scores) == 0:
         return plot_histogram(all_scores or pd.Series(dtype=float))
@@ -384,23 +384,26 @@ def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
     df["title"] = df["code"].map(lambda c: code_to_title.get(c, "Unknown Title"))
     df["label"] = df["code"] + " – " + df["title"]
 
-    # Pre-bin scores
+    # Compute bin edges and assign each observation to a bin
     edges = np.histogram_bin_edges(df["score"], bins=maxbins)
     df["bin"] = pd.cut(df["score"], bins=edges, include_lowest=True)
 
-    # Group by bin and build tooltip strings
     rows = []
     for iv, g in df.groupby("bin"):
         if iv is pd.NA or iv is None:
             continue
+
         labels = g["label"].tolist()
         extra = ""
         if len(labels) > max_titles:
-            extra = f"\n... (+{len(labels) - max_titles} more)"
+            extra = f"<br>... (+{len(labels) - max_titles} more)"
             labels = labels[:max_titles]
-        # Use newline between occupations for a stacked tooltip
-        titles_str = "\n".join(labels) + extra
+
+        # Use <br> for line breaks in HTML tooltip
+        titles_str = "<br>".join(labels) + extra
+
         rows.append({
+            "mid": 0.5 * (float(iv.left) + float(iv.right)),
             "bin_start": float(iv.left),
             "bin_end": float(iv.right),
             "count": len(g),
@@ -413,10 +416,9 @@ def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
 
     chart = (
         alt.Chart(bins_df)
-        .mark_bar(opacity=0.7, color="steelblue")
+        .mark_bar(size=20, opacity=0.7, color="steelblue")
         .encode(
-            x=alt.X("bin_start:Q", title="Similarity Score (Euclidean distance)"),
-            x2="bin_end:Q",
+            x=alt.X("mid:Q", title="Similarity Score (Euclidean distance)"),
             y=alt.Y("count:Q", title="Number of Occupations"),
             tooltip=[
                 alt.Tooltip("count:Q", title="Number of occupations"),
@@ -429,12 +431,11 @@ def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
     )
     return chart
 
-
 def cost_hist_with_titles(cost_df, maxbins=12, max_titles=40):
     """
-    Build a switching-cost histogram where each bar's tooltip lists
-    the occupations (code + title) that fall into that cost bin.
-    Bars are drawn as rectangles; tooltips have line breaks.
+    Switching-cost histogram where:
+    - Bars are rectangles
+    - Tooltip lists occupations (code + title) in that cost bin, one per line
     """
     if cost_df is None or cost_df.empty:
         return plot_cost_histogram(cost_df)
@@ -449,13 +450,17 @@ def cost_hist_with_titles(cost_df, maxbins=12, max_titles=40):
     for iv, g in df.groupby("bin"):
         if iv is pd.NA or iv is None:
             continue
+
         labels = g["label"].tolist()
         extra = ""
         if len(labels) > max_titles:
-            extra = f"\n... (+{len(labels) - max_titles} more)"
+            extra = f"<br>... (+{len(labels) - max_titles} more)"
             labels = labels[:max_titles]
-        titles_str = "\n".join(labels) + extra
+
+        titles_str = "<br>".join(labels) + extra
+
         rows.append({
+            "mid": 0.5 * (float(iv.left) + float(iv.right)),
             "bin_start": float(iv.left),
             "bin_end": float(iv.right),
             "count": len(g),
@@ -468,10 +473,9 @@ def cost_hist_with_titles(cost_df, maxbins=12, max_titles=40):
 
     chart = (
         alt.Chart(bins_df)
-        .mark_bar(opacity=0.7, color="seagreen")
+        .mark_bar(size=20, opacity=0.7, color="seagreen")
         .encode(
-            x=alt.X("bin_start:Q", title="Switching Cost ($)"),
-            x2="bin_end:Q",
+            x=alt.X("mid:Q", title="Switching Cost ($)"),
             y=alt.Y("count:Q", title="Number of Occupations"),
             tooltip=[
                 alt.Tooltip("count:Q", title="Number of occupations"),
