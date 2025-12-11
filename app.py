@@ -368,7 +368,7 @@ def plot_cost_histogram(cost_df):
 
 
 # ---- NEW: single-chart histograms with detailed tooltips ----
-def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
+def similarity_hist_with_titles(all_scores, maxbins=8, max_titles=40):
     """
     Similarity histogram where:
     - Bars are proper rectangles (not hairline lines)
@@ -431,7 +431,7 @@ def similarity_hist_with_titles(all_scores, maxbins=12, max_titles=40):
     )
     return chart
 
-def cost_hist_with_titles(cost_df, maxbins=12, max_titles=40):
+def cost_hist_with_titles(cost_df, maxbins=8, max_titles=40):
     """
     Switching-cost histogram where:
     - Bars are rectangles
