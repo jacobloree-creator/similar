@@ -347,7 +347,7 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
 
 
 def plot_cost_histogram(cost_df):
-    if cost_df.empty:
+    if cost_df is None or cost_df.empty:
         return (
             alt.Chart(pd.DataFrame({"cost": [0]}))
             .mark_bar()
@@ -368,6 +368,119 @@ def plot_cost_histogram(cost_df):
     return chart
 
 
+# ---- NEW: Interactive histograms with clickable bars ----
+def similarity_hist_with_table(all_scores):
+    """
+    Interactive similarity histogram:
+    - Top: histogram over similarity scores
+    - Bottom: list of occupations whose scores fall in the selected bin(s)
+    """
+    if all_scores is None or len(all_scores) == 0:
+        return plot_histogram(all_scores or pd.Series(dtype=float))
+
+    df = pd.DataFrame({
+        "code": all_scores.index,
+        "score": all_scores.values,
+    })
+    df["title"] = df["code"].map(lambda c: code_to_title.get(c, "Unknown Title"))
+    df["label"] = (
+        df["code"]
+        + " – "
+        + df["title"]
+        + " (score="
+        + df["score"].round(2).astype(str)
+        + ")"
+    )
+
+    # Brush selection along the x-axis (click or drag)
+    brush = alt.selection(type="interval", encodings=["x"])
+
+    hist = (
+        alt.Chart(df)
+        .mark_bar(opacity=0.7)
+        .encode(
+            alt.X(
+                "score:Q",
+                bin=alt.Bin(maxbins=30),
+                title="Similarity Score (Euclidean distance)",
+            ),
+            alt.Y("count():Q", title="Number of Occupations"),
+            tooltip=["count():Q"],
+        )
+        .add_selection(brush)
+        .properties(height=300)
+    )
+
+    # Table of occupations in the selected bin(s)
+    table = (
+        alt.Chart(df)
+        .transform_filter(brush)
+        .transform_window(row_number="row_number()")
+        .transform_filter("datum.row_number <= 50")  # cap at 50 rows for readability
+        .mark_text(align="left", baseline="top")
+        .encode(
+            y=alt.Y("row_number:O", axis=None),
+            text="label:N",
+        )
+        .properties(height=300)
+    )
+
+    return hist & table  # vertical concat
+
+
+def cost_hist_with_table(cost_df):
+    """
+    Interactive switching-cost histogram:
+    - Top: histogram over costs
+    - Bottom: list of occupations whose costs fall in the selected bin(s)
+    """
+    if cost_df is None or cost_df.empty:
+        return plot_cost_histogram(cost_df)
+
+    df = cost_df.copy()
+    df["label"] = (
+        df["code"]
+        + " – "
+        + df["title"]
+        + " (cost=$"
+        + df["cost"].round(0).astype(int).astype(str)
+        + ")"
+    )
+
+    brush = alt.selection(type="interval", encodings=["x"])
+
+    hist = (
+        alt.Chart(df)
+        .mark_bar(opacity=0.7)
+        .encode(
+            alt.X(
+                "cost:Q",
+                bin=alt.Bin(maxbins=30),
+                title="Switching Cost ($)",
+            ),
+            alt.Y("count():Q", title="Number of Occupations"),
+            tooltip=["count():Q"],
+        )
+        .add_selection(brush)
+        .properties(height=300)
+    )
+
+    table = (
+        alt.Chart(df)
+        .transform_filter(brush)
+        .transform_window(row_number="row_number()")
+        .transform_filter("datum.row_number <= 50")
+        .mark_text(align="left", baseline="top")
+        .encode(
+            y=alt.Y("row_number:O", axis=None),
+            text="label:N",
+        )
+        .properties(height=300)
+    )
+
+    return hist & table
+
+
 # ---- Career path ego-network helper ----
 def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
     """
@@ -377,8 +490,9 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
     # 1. Get all valid switching costs from this origin
     df_costs = compute_switching_costs_from_origin(origin_code, beta, alpha)
 
-    # Debug info in the UI so we can see what's going on
-    st.markdown(f"**Ego-network debug:** found {len(df_costs)} valid destinations under current settings.")
+    st.markdown(
+        f"**Ego-network debug:** found {len(df_costs)} valid destinations under current settings."
+    )
     if df_costs.empty:
         st.info(
             "Not enough valid transitions to build a network graph.\n\n"
@@ -426,7 +540,6 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
         cost_val = float(row["cost"])
         G.add_edge(origin_code, dest, title=f"Cost: {cost_val:,.0f}", value=cost_val)
 
-    # 4. Build pyvis network
     net = Network(
         height="600px",
         width="100%",
@@ -435,11 +548,8 @@ def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
         directed=True,
     )
     net.from_nx(G)
-
-    # Layout tuning (you can tweak these)
     net.repulsion(node_distance=180, spring_length=200, damping=0.85)
 
-    # 5. Generate HTML and embed directly (no temp files needed)
     html = net.generate_html()
     components.html(html, height=600, scrolling=True)
 
@@ -623,18 +733,20 @@ if menu == "Look up by code":
                 column_config={"Title": st.column_config.Column(width="large")},
             )
 
-            # Similarity histogram (under current education gap)
+            # Similarity histogram + clickable list
             st.subheader(
                 f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}"
             )
-            st.altair_chart(plot_histogram(all_scores), use_container_width=True)
+            st.caption("Tip: click or drag on the bars to see which occupations fall into that score range below.")
+            st.altair_chart(similarity_hist_with_table(all_scores), use_container_width=True)
 
-            # Switching cost histogram (under current education gap)
+            # Switching cost histogram + clickable list
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
             st.subheader(
                 f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}"
             )
-            st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
+            st.caption("Tip: click or drag on the bars to see which occupations fall into that cost range below.")
+            st.altair_chart(cost_hist_with_table(costs_df), use_container_width=True)
 
             # Career path ego-network
             with st.expander("Career path network (local view)", expanded=False):
@@ -694,20 +806,22 @@ elif menu == "Look up by title":
             column_config={"Title": st.column_config.Column(width="large")},
         )
 
-        # Similarity histogram
+        # Similarity histogram + clickable list
         st.subheader(
             f"Similarity Score Distribution for {selected_code} – {selected_title}"
         )
-        st.altair_chart(plot_histogram(all_scores), use_container_width=True)
+        st.caption("Tip: click or drag on the bars to see which occupations fall into that score range below.")
+        st.altair_chart(similarity_hist_with_table(all_scores), use_container_width=True)
 
-        # Switching cost histogram
+        # Switching cost histogram + clickable list
         costs_df = compute_switching_costs_from_origin(
             selected_code, beta=beta, alpha=alpha
         )
         st.subheader(
             f"Switching Cost Distribution from {selected_code} – {selected_title}"
         )
-        st.altair_chart(plot_cost_histogram(costs_df), use_container_width=True)
+        st.caption("Tip: click or drag on the bars to see which occupations fall into that cost range below.")
+        st.altair_chart(cost_hist_with_table(costs_df), use_container_width=True)
 
         # Career path ego-network
         with st.expander("Career path network (local view)", expanded=False):
