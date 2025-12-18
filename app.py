@@ -230,6 +230,8 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
     """
     Compute a global scale k so that the average cost for risky->safe pairs
     (across all education levels) equals target_usd.
+
+    IMPORTANT: Base cost is now 2 * w_origin (two months of origin wages).
     Returns (k, n_pairs_used).
     """
     pairs = []
@@ -239,14 +241,17 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
         for s in safe_codes:
             if s == r or s not in standardized_df.index:
                 continue
-            if (code_to_wage.get(r) is None) or (code_to_wage.get(s) is None):
+            w_origin = code_to_wage.get(r)
+            if w_origin is None:
                 continue
+
             z = standardized_df.loc[r, s]
             if pd.isna(z):
                 z = standardized_df.loc[s, r]
             if pd.isna(z):
                 continue
-            base = 2 * np.sqrt(code_to_wage[r] * code_to_wage[s])
+
+            base = 2 * w_origin  # <-- CHANGED: origin wages only, keep "2 months" factor
             mult = training_multiplier(z)
             raw_cost = base * (1 + beta * abs(z) ** alpha) * mult
             pairs.append(raw_cost)
@@ -261,7 +266,9 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
 
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """
-    Cost = k * [ 2*sqrt(w_o*w_d) * (1 + beta*|z|^alpha) * m(|z|) ]  +  λ * GeoCost
+    Cost = k * [ 2*w_o * (1 + beta*|z|^alpha) * m(|z|) ]  +  λ * GeoCost
+
+    - Base cost is now 2 months of ORIGIN wages: 2 * w_o
     - Calibration k is ALWAYS applied to the skill/training component.
     - Only computed for pairs whose education levels differ by at most EDU_GAP.
     - Geographic component is optional (controlled by USE_GEO and sidebar params).
@@ -270,27 +277,26 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     level2 = get_education_level(code2)
     if level1 is None or level2 is None:
         return None
-    # Enforce max education distance requirement (EDU_GAP is global set from slider)
     if abs(level1 - level2) > EDU_GAP:
         return None
 
     if code1 not in standardized_df.index or code2 not in standardized_df.index:
         return None
+
     z_score = standardized_df.loc[code1, code2]
     if pd.isna(z_score):
         z_score = standardized_df.loc[code2, code1]
     if pd.isna(z_score):
         return None
+
     w_origin = code_to_wage.get(code1)
-    w_dest = code_to_wage.get(code2)
-    if w_origin is None or w_dest is None:
+    if w_origin is None:
         return None
 
-    base_cost = 2 * np.sqrt(w_origin * w_dest)
+    base_cost = 2 * w_origin  # <-- CHANGED: origin wages only, keep "2 months" factor
     multiplier = training_multiplier(z_score)
     skill_cost = CALIB_K * base_cost * (1 + beta * abs(z_score) ** alpha) * multiplier
 
-    # Optional geographic mobility cost
     if USE_GEO:
         geo_cost = geographic_cost(code2, USER_PROVINCE, GEO_C_MOVE)
         return skill_cost + GEO_LAMBDA * geo_cost
