@@ -123,14 +123,50 @@ def load_data():
 
 def get_education_level(noc_code):
     """
-    Education required is the thousands digit by your convention:
-    e.g., 14110 -> 4 (the second digit of the 5-digit code).
+    Education tier is reverse-coded:
+      1 = university degree (highest)
+      2 = 4-year college diploma
+      3 = 2-year college diploma
+      4 = high school diploma
+      5 = no education required (lowest)
+
+    Tier is the thousands digit by your convention:
+      e.g., 14110 -> 4 (the second digit of the 5-digit code).
     """
     try:
         s = str(noc_code).zfill(5)
         return int(s[1])
     except Exception:
         return None
+
+
+def credential_months(origin_code, dest_code):
+    """
+    Additional credential/training months, T(eo, ed), under reverse-coded education tiers.
+
+    "Upgrading" education = moving to a SMALLER tier number (e.g., 4 -> 2 or 2 -> 1).
+    We implement:
+      Δ = max(0, eo - ed)
+      T = Δ * τ(ed) + κ(ed)
+
+    Intuition:
+    - Steps into more credential-intensive destination tiers cost more months.
+    - Even lateral moves into high tiers can have some baseline credential overhead via κ(ed).
+    """
+    eo = get_education_level(origin_code)
+    ed = get_education_level(dest_code)
+    if eo is None or ed is None:
+        return 0.0
+
+    delta = max(0, eo - ed)  # upgrading only (reverse-coded)
+
+    # months per upgrade step depends on DESTINATION tier
+    tau = {1: 9.0, 2: 6.0, 3: 3.0, 4: 1.0, 5: 0.0}
+
+    # baseline credential overhead depends on DESTINATION tier (even if delta == 0)
+    kappa = {1: 3.0, 2: 2.0, 3: 1.0, 4: 0.0, 5: 0.0}
+
+    return float(delta) * tau.get(ed, 0.0) + kappa.get(ed, 0.0)
 
 
 def get_most_and_least_similar(code, n=5):
@@ -216,7 +252,7 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Calibrate k so that average risky->safe skill cost ~= target_usd.
-    Base cost is 2 * w_origin (two months of origin wages).
+    Base cost is (2 + T)*w_origin, where T is credential_months(origin,dest).
     Calibration uses ALL occupations (no EDU restriction).
     """
     pairs = []
@@ -236,7 +272,8 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
             if pd.isna(z):
                 continue
 
-            base = 2 * float(w_origin)  # origin wages only
+            months = 2.0 + credential_months(r, s)  # <-- CHANGE
+            base = months * float(w_origin)         # <-- CHANGE
             dist_term = 1 + beta * (abs(float(z)) ** alpha)
             mult = float(training_multiplier(z))
             raw_cost = base * dist_term * mult
@@ -256,9 +293,9 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     """
     TotalCost = SkillCost + λ * GeoCost
 
-    SkillCost = k * [ (2*w_origin) * (1 + beta*|z|^alpha) * m(|z|) ]
+    SkillCost = k * [ ((2 + T)*w_origin) * (1 + beta*|z|^alpha) * m(|z|) ]
 
-    - Uses origin wages only (2 months of origin wages).
+    - Uses origin wages only, but "2 months" becomes (2 + T) months via credential_months().
     - Applies EDU_GAP restriction for displayed outputs.
     - Geographic component is optional.
     """
@@ -282,7 +319,8 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     if w_origin is None:
         return None
 
-    base = 2 * float(w_origin)
+    months = 2.0 + credential_months(code1, code2)  # <-- CHANGE
+    base = months * float(w_origin)                 # <-- CHANGE
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
 
@@ -297,13 +335,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
 
 def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     """
-    Returns a decomposition dict for the displayed (EDU-restricted) transition:
-      Base = 2*w_origin
-      Distance term = (1 + beta*|z|^alpha)
-      Training mult = m(|z|)
-      Skill cost (before geo) = k * Base * Distance term * Training mult
-      Geo add = λ * GeoCost (if enabled)
-      Total cost = Skill cost + Geo add
+    Returns a decomposition dict for the displayed (EDU-restricted) transition.
     """
     level1 = get_education_level(origin_code)
     level2 = get_education_level(dest_code)
@@ -324,7 +356,8 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     if w_origin is None:
         return None
 
-    base = 2 * float(w_origin)
+    months = 2.0 + credential_months(origin_code, dest_code)  # <-- CHANGE
+    base = months * float(w_origin)                           # <-- CHANGE
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
 
@@ -344,7 +377,7 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
         "Destination": dest_code,
         "Title": code_to_title.get(dest_code, "Unknown Title"),
         "|z|": abs(float(z)),
-        "Base (2×origin wage)": base,
+        "Base (months×origin wage)": base,  # <-- label updated to match change
         "Distance term": dist_term,
         "Training mult": mult,
         "k (calibration)": float(CALIB_K),
@@ -376,7 +409,6 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
 # ---- Histograms with tooltips listing occupations per bin (distribution like before) ----
 def similarity_hist_with_titles(all_scores, maxbins=30, max_titles=50):
     if all_scores is None or len(all_scores) == 0:
-        # fallback to simple histogram
         hist_df = pd.DataFrame({"score": (all_scores.values if all_scores is not None else [])})
         return (
             alt.Chart(hist_df)
@@ -571,7 +603,7 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-# Placeholder defaults; overwritten after sidebar sets beta/alpha? (we calibrate with fixed beta/alpha benchmark)
+# Calibrate k using benchmark beta/alpha (unchanged)
 CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
@@ -629,7 +661,8 @@ with st.expander("Methodology"):
     st.markdown(
         """
 - Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
-- Switching costs are scaled by **two months of origin wages** and adjusted for skill distance using a non-linear term and a training multiplier.  
+- Switching costs are scaled by origin wages and interpreted as **months of foregone earnings**.  
+- The baseline is **2 months**, plus an additional credentialing time term **T** that is larger when moving into more credential-intensive education tiers (tiers are reverse-coded: 1=university … 5=none).  
 - A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000** (using the full universe of occupations).  
 - Displayed results restrict possible transitions to those within a chosen education-distance threshold (thousands digit of the NOC).  
         """
@@ -637,7 +670,7 @@ with st.expander("Methodology"):
     st.latex(
         r"""
 \text{SkillCost}
-= k \cdot \left(2\,w_o\right)
+= k \cdot \left((2 + T)\,w_o\right)
   \cdot \left(1 + \beta\,|z|^{\alpha}\right)
   \cdot m(|z|)
 """
@@ -687,22 +720,17 @@ if menu == "Look up by code":
                         decomp_rows.append(d)
                 if decomp_rows:
                     decomp_df = pd.DataFrame(decomp_rows)
-                    # nicer ordering
                     preferred_cols = [
                         "Origin", "Destination", "Title",
-                        "Base (2×origin wage)", "Distance term", "Training mult", "k (calibration)",
+                        "Base (months×origin wage)", "Distance term", "Training mult", "k (calibration)",
                         "Skill cost", "Geo add", "Total cost", "|z|"
                     ]
-                    for c in preferred_cols:
-                        if c not in decomp_df.columns:
-                            preferred_cols.remove(c)
                     decomp_df = decomp_df[[c for c in preferred_cols if c in decomp_df.columns]]
 
-                    # formatting
-                    money_cols = ["Base (2×origin wage)", "Skill cost", "Geo add", "Total cost"]
+                    money_cols = ["Base (months×origin wage)", "Skill cost", "Geo add", "Total cost"]
                     for c in money_cols:
                         if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{v:,.2f}")
+                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):,.2f}")
 
                     if "Distance term" in decomp_df.columns:
                         decomp_df["Distance term"] = decomp_df["Distance term"].map(lambda v: f"{float(v):.4f}")
@@ -765,12 +793,12 @@ elif menu == "Look up by title":
                 decomp_df = pd.DataFrame(decomp_rows)
                 preferred_cols = [
                     "Origin", "Destination", "Title",
-                    "Base (2×origin wage)", "Distance term", "Training mult", "k (calibration)",
+                    "Base (months×origin wage)", "Distance term", "Training mult", "k (calibration)",
                     "Skill cost", "Geo add", "Total cost", "|z|"
                 ]
                 decomp_df = decomp_df[[c for c in preferred_cols if c in decomp_df.columns]]
 
-                money_cols = ["Base (2×origin wage)", "Skill cost", "Geo add", "Total cost"]
+                money_cols = ["Base (months×origin wage)", "Skill cost", "Geo add", "Total cost"]
                 for c in money_cols:
                     if c in decomp_df.columns:
                         decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):,.2f}")
@@ -839,7 +867,7 @@ elif menu == "Compare two jobs":
                         st.info("No decomposition available (filtered out or missing data).")
                     else:
                         dd = pd.DataFrame([d])
-                        money_cols = ["Base (2×origin wage)", "Skill cost", "Geo add", "Total cost"]
+                        money_cols = ["Base (months×origin wage)", "Skill cost", "Geo add", "Total cost"]
                         for c in money_cols:
                             if c in dd.columns:
                                 dd[c] = dd[c].map(lambda v: f"{float(v):,.2f}")
