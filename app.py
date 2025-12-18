@@ -252,8 +252,9 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Calibrate k so that average risky->safe skill cost ~= target_usd.
-    Base cost is (2 + T)*w_origin, where T is credential_months(origin,dest).
-    Calibration uses ALL occupations (no EDU restriction).
+
+    IMPORTANT: calibration is done BEFORE the education credential-month penalty:
+    Base cost is 2 * w_origin (two months of origin wages), NO T term.
     """
     pairs = []
     for r in risky_codes:
@@ -262,6 +263,7 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
         w_origin = code_to_wage.get(r)
         if w_origin is None:
             continue
+
         for s in safe_codes:
             if s == r or s not in standardized_df.index:
                 continue
@@ -272,8 +274,9 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
             if pd.isna(z):
                 continue
 
-            months = 2.0 + credential_months(r, s)  # <-- CHANGE
-            base = months * float(w_origin)         # <-- CHANGE
+            # --- Calibration uses the OLD baseline (no credential months) ---
+            base = 2.0 * float(w_origin)
+
             dist_term = 1 + beta * (abs(float(z)) ** alpha)
             mult = float(training_multiplier(z))
             raw_cost = base * dist_term * mult
