@@ -140,35 +140,6 @@ def get_education_level(noc_code):
         return None
 
 
-def credential_months(origin_code, dest_code):
-    """
-    Additional credential/training months, T(eo, ed), under reverse-coded education tiers.
-
-    "Upgrading" education = moving to a SMALLER tier number (e.g., 4 -> 2 or 2 -> 1).
-    We implement:
-      Δ = max(0, eo - ed)
-      T = Δ * τ(ed) + κ(ed)
-
-    Intuition:
-    - Steps into more credential-intensive destination tiers cost more months.
-    - Even lateral moves into high tiers can have some baseline credential overhead via κ(ed).
-    """
-    eo = get_education_level(origin_code)
-    ed = get_education_level(dest_code)
-    if eo is None or ed is None:
-        return 0.0
-
-    delta = max(0, eo - ed)  # upgrading only (reverse-coded)
-
-    # months per upgrade step depends on DESTINATION tier
-    tau = {1: 9.0, 2: 6.0, 3: 3.0, 4: 1.0, 5: 0.0}
-
-    # baseline credential overhead depends on DESTINATION tier (even if delta == 0)
-    kappa = {1: 3.0, 2: 2.0, 3: 1.0, 4: 0.0, 5: 0.0}
-
-    return float(delta) * tau.get(ed, 0.0) + kappa.get(ed, 0.0)
-
-
 def get_most_and_least_similar(code, n=5):
     if code not in similarity_df.index:
         return None, None, None
@@ -322,8 +293,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     if w_origin is None:
         return None
 
-    months = 2.0 + credential_months(code1, code2)  # <-- CHANGE
-    base = months * float(w_origin)                 # <-- CHANGE
+    base = 2.0 * float(w_origin)
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
 
@@ -359,8 +329,9 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     if w_origin is None:
         return None
 
-    months = 2.0 + credential_months(origin_code, dest_code)  # <-- CHANGE
-    base = months * float(w_origin)                           # <-- CHANGE
+    base = 2.0 * float(w_origin)
+    ...
+    "Base (2×origin wage)": base,
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
 
@@ -380,7 +351,7 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
         "Destination": dest_code,
         "Title": code_to_title.get(dest_code, "Unknown Title"),
         "|z|": abs(float(z)),
-        "Base (months×origin wage)": base,  # <-- label updated to match change
+        "Base (2×origin wage)": base,  # <-- label updated to match change
         "Distance term": dist_term,
         "Training mult": mult,
         "k (calibration)": float(CALIB_K),
