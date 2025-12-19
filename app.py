@@ -299,14 +299,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
 
 def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     """
-    Returns a decomposition dict for the displayed (EDU-restricted) transition:
-      Base = 2*w_origin
-      Distance term = (1 + beta*|z|^alpha)
-      Training mult = m(|z|)
-      Skill cost (before geo) = k * Base * Distance term * Training mult
-      Geo add = λ * GeoCost (if enabled)
-      Total cost = Skill cost + Geo add
-
+    Returns a decomposition dict for the displayed (EDU-restricted) transition.
     Also returns benchmarks:
       Months of origin wages = Total / w_origin
       Years of origin wages  = Total / (12*w_origin)
@@ -674,34 +667,48 @@ if menu == "Look up by code":
         if code in similarity_df.index:
             top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
 
+            w_origin = code_to_wage.get(code)
+
             # Most similar
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
-            df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+            df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
+            df_top["Switching Cost ($)"] = df_top["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+            df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
+                lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
+            ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+            df_top = df_top.drop(columns=["_sc_numeric"])
             st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
             # Least similar
             st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
-            df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+            df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
+            df_bottom["Switching Cost ($)"] = df_bottom["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+            df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
+                lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
+            ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+            df_bottom = df_bottom.drop(columns=["_sc_numeric"])
             st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
             # Decomposition expander (only for shown rows)
             with st.expander("Switching cost decomposition (details)", expanded=False):
-                shown_codes = list(df_top["Code"].astype(str)) + list(df_bottom["Code"].astype(str))
+                shown_codes = list(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str)) + \
+                              list(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
+
                 decomp_rows = []
                 for dest in shown_codes:
                     d = switching_cost_components(code, dest, beta=beta, alpha=alpha)
                     if d is not None:
                         decomp_rows.append(d)
+
                 if decomp_rows:
                     decomp_df = pd.DataFrame(decomp_rows)
                     preferred_cols = [
                         "Origin", "Destination", "Title",
                         "Base (2×origin wage)", "Distance term", "Training mult", "k (calibration)",
-                        "Skill cost", "Geo add", "Total cost", "Months of origin wages", "Years of origin wages", "|z|"
+                        "Skill cost", "Geo add", "Total cost",
+                        "Months of origin wages", "Years of origin wages", "|z|"
                     ]
                     decomp_df = decomp_df[[c for c in preferred_cols if c in decomp_df.columns]]
 
@@ -757,31 +764,45 @@ elif menu == "Look up by title":
         selected_code, selected_title = selected_item.split(" – ")
         top_results, bottom_results, all_scores = get_most_and_least_similar(selected_code, n=n_results)
 
+        w_origin = code_to_wage.get(selected_code)
+
         st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
         df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-        df_top["Switching Cost ($)"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
-        df_top["Switching Cost ($)"] = df_top["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+        df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
+        df_top["Switching Cost ($)"] = df_top["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+        df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
+            lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
+        ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+        df_top = df_top.drop(columns=["_sc_numeric"])
         st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
         st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
         df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-        df_bottom["Switching Cost ($)"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
-        df_bottom["Switching Cost ($)"] = df_bottom["Switching Cost ($)"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+        df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
+        df_bottom["Switching Cost ($)"] = df_bottom["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
+        df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
+            lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
+        ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+        df_bottom = df_bottom.drop(columns=["_sc_numeric"])
         st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
         with st.expander("Switching cost decomposition (details)", expanded=False):
-            shown_codes = list(df_top["Code"].astype(str)) + list(df_bottom["Code"].astype(str))
+            shown_codes = list(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str)) + \
+                          list(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
+
             decomp_rows = []
             for dest in shown_codes:
                 d = switching_cost_components(selected_code, dest, beta=beta, alpha=alpha)
                 if d is not None:
                     decomp_rows.append(d)
+
             if decomp_rows:
                 decomp_df = pd.DataFrame(decomp_rows)
                 preferred_cols = [
                     "Origin", "Destination", "Title",
                     "Base (2×origin wage)", "Distance term", "Training mult", "k (calibration)",
-                    "Skill cost", "Geo add", "Total cost", "Months of origin wages", "Years of origin wages", "|z|"
+                    "Skill cost", "Geo add", "Total cost",
+                    "Months of origin wages", "Years of origin wages", "|z|"
                 ]
                 decomp_df = decomp_df[[c for c in preferred_cols if c in decomp_df.columns]]
 
@@ -849,7 +870,6 @@ elif menu == "Compare two jobs":
             )
 
             if cost is not None:
-                # --- NEW: benchmark cost in months/years of origin wages ---
                 w_origin = code_to_wage.get(job1_code)
                 months_equiv = None
                 years_equiv = None
