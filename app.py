@@ -3,9 +3,6 @@ import pandas as pd
 import os
 import altair as alt
 import numpy as np
-import networkx as nx
-from pyvis.network import Network
-import streamlit.components.v1 as components
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -511,59 +508,6 @@ def cost_hist_with_titles(cost_df, maxbins=30, max_titles=50):
     )
 
 
-# ---- Career path ego-network helper ----
-def build_and_show_ego_network(origin_code, beta, alpha, max_neighbors=15):
-    df_costs = compute_switching_costs_from_origin(origin_code, beta, alpha)
-
-    st.markdown(f"**Ego-network debug:** found {len(df_costs)} valid destinations under current settings.")
-    if df_costs.empty:
-        st.info(
-            "Not enough valid transitions to build a network graph.\n\n"
-            "- Try increasing the max education distance (EDU_GAP) in the sidebar.\n"
-            "- Check that wages exist for destination occupations.\n"
-            "- Check that switching costs are not all filtered out."
-        )
-        return
-
-    df_costs = df_costs.sort_values("cost").head(max_neighbors)
-
-    st.markdown("Top destinations used for the network:")
-    st.dataframe(df_costs[["code", "title", "cost"]])
-
-    G = nx.DiGraph()
-
-    def node_attrs(code):
-        title = code_to_title.get(code, "Unknown")
-        roa = code_to_roa.get(code)
-        if roa is None:
-            color = "#999999"
-        elif roa >= RISKY_THRESHOLD:
-            color = "#d62728"
-        else:
-            color = "#1f77b4"
-        wage = code_to_wage.get(code)
-        label = f"{code}\n{title[:30]}"
-        tooltip = f"{code} – {title}"
-        if wage is not None:
-            tooltip += f"<br>Wage: {wage:,.0f}"
-        if roa is not None:
-            tooltip += f"<br>Automation risk: {roa:.2f}"
-        return dict(label=label, title=tooltip, color=color)
-
-    G.add_node(origin_code, **node_attrs(origin_code))
-    for _, row in df_costs.iterrows():
-        dest = row["code"]
-        G.add_node(dest, **node_attrs(dest))
-        cost_val = float(row["cost"])
-        G.add_edge(origin_code, dest, title=f"Cost: {cost_val:,.0f}", value=cost_val)
-
-    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="#000000", directed=True)
-    net.from_nx(G)
-    net.repulsion(node_distance=180, spring_length=200, damping=0.85)
-
-    components.html(net.generate_html(), height=600, scrolling=True)
-
-
 # ---------- Risky/Safe sets & calibration ----------
 RISKY_THRESHOLD = 0.70
 SAFE_THRESHOLD = 0.70
@@ -750,10 +694,6 @@ if menu == "Look up by code":
             st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
             st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
 
-            # Career path network
-            with st.expander("Career path network (local view)", expanded=False):
-                build_and_show_ego_network(code, beta, alpha, max_neighbors=15)
-
 # ---------- Look up by title ----------
 elif menu == "Look up by title":
     available_codes = [c for c in code_to_title if c in similarity_df.index]
@@ -841,9 +781,6 @@ elif menu == "Look up by title":
         st.subheader(f"Switching Cost Distribution from {selected_code} – {selected_title}")
         st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
         st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
-
-        with st.expander("Career path network (local view)", expanded=False):
-            build_and_show_ego_network(selected_code, beta, alpha, max_neighbors=15)
 
 # ---------- Compare two jobs ----------
 elif menu == "Compare two jobs":
