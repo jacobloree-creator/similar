@@ -133,8 +133,7 @@ def get_education_level(noc_code):
         return None
 
 
-# --- NEW (Option 2 integration): credential-heavy education-months matrix ---
-# Rows = origin tier (1..5), Cols = destination tier (1..5)
+# --- Education-months matrix (Option 2 folded into base) ---
 EDU_MONTHS_MATRIX = np.array([
     # dest:  1   2   3   4   5
     [   0,  0,  0,  0,  0],   # origin 1 (uni)
@@ -148,7 +147,6 @@ EDU_MONTHS_CAP = 60.0  # cap at 5 years
 
 
 def expected_education_months(origin_code: str, dest_code: str) -> float:
-    """Expected additional months based on origin/destination education tiers."""
     eo = get_education_level(origin_code)
     ed = get_education_level(dest_code)
     if eo is None or ed is None:
@@ -216,10 +214,6 @@ def training_multiplier(z_score):
 
 
 def geographic_cost(dest_code, province, C_move=20000.0):
-    """
-    Expected relocation cost for moving into dest_code from given province.
-    Uses jobprov_df (share of workers in each province for that occupation).
-    """
     if province is None:
         return 0.0
     if jobprov_df is None or jobprov_df.empty:
@@ -241,13 +235,8 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
-    Compute a global k so that the average cost for risky->safe pairs
-    (across the full universe; no EDU distance restriction here) equals target_usd.
-
-    NOTE: This calibration uses the "baseline months" part only (2 months of origin wages),
-    and does NOT include the education-months matrix.
-
-    Returns (k, n_pairs_used).
+    Calibration uses ONLY the 2-month baseline (no education months in calibration),
+    so k remains comparable to earlier versions.
     """
     pairs = []
     for r in risky_codes:
@@ -266,8 +255,7 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
             if pd.isna(z):
                 continue
 
-            # calibration base: 2 months only (no education months)
-            base = 2.0 * float(w_origin)
+            base = 2.0 * float(w_origin)  # <-- baseline only
             dist_term = 1 + beta * (abs(float(z)) ** alpha)
             mult = float(training_multiplier(z))
             raw_cost = base * dist_term * mult
@@ -284,16 +272,6 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
 
 
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
-    """
-    TotalCost = SkillCost + λ * GeoCost
-
-    SkillCost = k * [ ((2 + EDU_MONTHS)*w_origin) * (1 + beta*|z|^alpha) * m(|z|) ]
-
-    - Uses origin wages only (monthly).
-    - Option 2 integration: Education-months matrix is folded into the BASE months.
-    - Applies EDU_GAP restriction for displayed outputs.
-    - Geographic component is optional (controlled by USE_GEO and sidebar params).
-    """
     level1 = get_education_level(code1)
     level2 = get_education_level(code2)
     if level1 is None or level2 is None:
@@ -316,7 +294,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     w_origin = float(w_origin)
 
     edu_months = expected_education_months(code1, code2)
-    base = (2.0 + float(edu_months)) * w_origin
+    base = (2.0 + float(edu_months)) * w_origin  # <-- Option 2
 
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
@@ -331,11 +309,6 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
 
 
 def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
-    """
-    Returns a decomposition dict for the displayed (EDU-restricted) transition.
-    Also returns benchmarks:
-      Years of origin wages = Total / (12*w_origin)
-    """
     level1 = get_education_level(origin_code)
     level2 = get_education_level(dest_code)
     if level1 is None or level2 is None:
@@ -397,8 +370,11 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
 
 
 def compute_switching_costs_from_origin(origin_code, beta, alpha):
+    """Returns a dataframe with both $ cost and years-of-origin-wages cost for all allowed destinations."""
     rows = []
     origin_level = get_education_level(origin_code)
+    w_origin = code_to_wage.get(origin_code)
+
     for dest in similarity_df.columns:
         if dest == origin_code:
             continue
@@ -407,13 +383,22 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
             continue
         if abs(lev - origin_level) > EDU_GAP:
             continue
+
         cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha)
         if pd.notnull(cost):
-            rows.append({"code": dest, "title": code_to_title.get(dest, "Unknown Title"), "cost": float(cost)})
+            years = np.nan
+            if w_origin is not None and float(w_origin) > 0:
+                years = float(cost) / (12.0 * float(w_origin))
+            rows.append({
+                "code": dest,
+                "title": code_to_title.get(dest, "Unknown Title"),
+                "cost": float(cost),
+                "years": float(years) if pd.notnull(years) else np.nan,
+            })
     return pd.DataFrame(rows)
 
 
-# ---- Histograms with tooltips listing occupations per bin (distribution like before) ----
+# ---- Histograms with tooltips listing occupations per bin ----
 def similarity_hist_with_titles(all_scores, maxbins=30, max_titles=50):
     if all_scores is None or len(all_scores) == 0:
         hist_df = pd.DataFrame({"score": (all_scores.values if all_scores is not None else [])})
@@ -483,20 +468,33 @@ def similarity_hist_with_titles(all_scores, maxbins=30, max_titles=50):
     )
 
 
-def cost_hist_with_titles(cost_df, maxbins=30, max_titles=50):
-    if cost_df is None or cost_df.empty:
+def cost_hist_with_titles(cost_df, value_col, x_title, fmt_start, fmt_end, maxbins=30, max_titles=50):
+    """
+    Generic histogram builder for either dollar costs or years-of-origin-wage costs.
+    value_col must be "cost" or "years".
+    """
+    if cost_df is None or cost_df.empty or value_col not in cost_df.columns:
         return (
-            alt.Chart(pd.DataFrame({"cost": [0]}))
+            alt.Chart(pd.DataFrame({value_col: [0]}))
             .mark_bar()
-            .encode(alt.X("cost:Q", bin=alt.Bin(maxbins=1), title="Switching Cost ($)"))
+            .encode(alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=1), title=x_title))
             .properties(width=600, height=400)
         )
 
     df = cost_df.copy()
+    df = df[pd.notnull(df[value_col])]
+    if df.empty:
+        return (
+            alt.Chart(pd.DataFrame({value_col: [0]}))
+            .mark_bar()
+            .encode(alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=1), title=x_title))
+            .properties(width=600, height=400)
+        )
+
     df["label"] = df["code"] + " – " + df["title"]
 
-    edges = np.histogram_bin_edges(df["cost"], bins=maxbins)
-    df["bin_interval"] = pd.cut(df["cost"], bins=edges, include_lowest=True)
+    edges = np.histogram_bin_edges(df[value_col], bins=maxbins)
+    df["bin_interval"] = pd.cut(df[value_col], bins=edges, include_lowest=True)
 
     rows = []
     for iv, g in df.groupby("bin_interval"):
@@ -522,7 +520,7 @@ def cost_hist_with_titles(cost_df, maxbins=30, max_titles=50):
             alt.Chart(df)
             .mark_bar(opacity=0.7, color="seagreen")
             .encode(
-                alt.X("cost:Q", bin=alt.Bin(maxbins=30), title="Switching Cost ($)"),
+                alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=30), title=x_title),
                 alt.Y("count()", title="Number of Occupations"),
             )
             .properties(width=600, height=400)
@@ -532,13 +530,13 @@ def cost_hist_with_titles(cost_df, maxbins=30, max_titles=50):
         alt.Chart(bins_df)
         .mark_bar(opacity=0.7, color="seagreen")
         .encode(
-            x=alt.X("bin_start:Q", bin=alt.Bin(binned=True), title="Switching Cost ($)"),
+            x=alt.X("bin_start:Q", bin=alt.Bin(binned=True), title=x_title),
             x2="bin_end:Q",
             y=alt.Y("count:Q", title="Number of Occupations"),
             tooltip=[
                 alt.Tooltip("count:Q", title="Number of occupations"),
-                alt.Tooltip("bin_start:Q", format=",.0f", title="Cost from"),
-                alt.Tooltip("bin_end:Q", format=",.0f", title="Cost to"),
+                alt.Tooltip("bin_start:Q", format=fmt_start, title="From"),
+                alt.Tooltip("bin_end:Q", format=fmt_end, title="To"),
                 alt.Tooltip("titles_str:N", title="Occupations in this bin"),
             ],
         )
@@ -557,7 +555,6 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-# Calibrate k using benchmark beta/alpha (always applied)
 CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
 
 # ---------- Streamlit App ----------
@@ -598,6 +595,13 @@ if USE_GEO:
         st.sidebar.info(
             "Geographic cost selected, but no job_province_share file found. Geographic component will be treated as zero."
         )
+
+# --- NEW: toggle for histogram units ---
+HIST_UNIT = st.sidebar.radio(
+    "Switching cost histogram units",
+    options=["Dollars ($)", "Years of origin wages"],
+    index=0,
+)
 
 with st.sidebar.expander("Calibration status", expanded=False):
     st.markdown(
@@ -731,11 +735,22 @@ if menu == "Look up by code":
             st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
             st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-            # Switching cost histogram
+            # Switching cost histogram (toggle)
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
-            st.subheader(f"Switching Cost Distribution from {code} – {code_to_title.get(code,'Unknown')}")
-            st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
-            st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
+            if HIST_UNIT == "Dollars ($)":
+                st.subheader(f"Switching Cost Distribution (Dollars) from {code} – {code_to_title.get(code,'Unknown')}")
+                st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
+                st.altair_chart(
+                    cost_hist_with_titles(costs_df, value_col="cost", x_title="Switching Cost ($)", fmt_start=",.0f", fmt_end=",.0f"),
+                    use_container_width=True,
+                )
+            else:
+                st.subheader(f"Switching Cost Distribution (Years of origin wages) from {code} – {code_to_title.get(code,'Unknown')}")
+                st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
+                st.altair_chart(
+                    cost_hist_with_titles(costs_df, value_col="years", x_title="Years of origin wages", fmt_start=".2f", fmt_end=".2f"),
+                    use_container_width=True,
+                )
 
 # ---------- Look up by title ----------
 elif menu == "Look up by title":
@@ -811,7 +826,7 @@ elif menu == "Look up by title":
                 if "Training mult" in decomp_df.columns:
                     decomp_df["Training mult"] = decomp_df["Training mult"].map(lambda v: f"{float(v):.2f}")
                 if "k (calibration)" in decomp_df.columns:
-                    decomp_df["k (calibration)" ] = decomp_df["k (calibration)"].map(lambda v: f"{float(v):.3f}")
+                    decomp_df["k (calibration)"] = decomp_df["k (calibration)"].map(lambda v: f"{float(v):.3f}")
                 if "|z|" in decomp_df.columns:
                     decomp_df["|z|"] = decomp_df["|z|"].map(lambda v: f"{float(v):.3f}")
 
@@ -823,10 +838,22 @@ elif menu == "Look up by title":
         st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
         st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
+        # Switching cost histogram (toggle)
         costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha)
-        st.subheader(f"Switching Cost Distribution from {selected_code} – {selected_title}")
-        st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
-        st.altair_chart(cost_hist_with_titles(costs_df), use_container_width=True)
+        if HIST_UNIT == "Dollars ($)":
+            st.subheader(f"Switching Cost Distribution (Dollars) from {selected_code} – {selected_title}")
+            st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
+            st.altair_chart(
+                cost_hist_with_titles(costs_df, value_col="cost", x_title="Switching Cost ($)", fmt_start=",.0f", fmt_end=",.0f"),
+                use_container_width=True,
+            )
+        else:
+            st.subheader(f"Switching Cost Distribution (Years of origin wages) from {selected_code} – {selected_title}")
+            st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
+            st.altair_chart(
+                cost_hist_with_titles(costs_df, value_col="years", x_title="Years of origin wages", fmt_start=".2f", fmt_end=".2f"),
+                use_container_width=True,
+            )
 
 # ---------- Compare two jobs ----------
 elif menu == "Compare two jobs":
@@ -917,3 +944,10 @@ elif menu == "Compare two jobs":
                 )
         else:
             st.error("❌ Could not compare occupations.")
+
+
+
+# (Global variables referenced in helper functions)
+# Streamlit executes top-to-bottom; these are defined after sidebar.
+# They are declared here for linting clarity only:
+# EDU_GAP, USE_GEO, USER_PROVINCE, GEO_C_MOVE, GEO_LAMBDA, CALIB_K, CALIB_PAIRS
