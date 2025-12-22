@@ -8,7 +8,7 @@ import numpy as np
 # STATIC MODEL SETTINGS (no sliders for education/recert logic)
 # ============================================================
 
-# Per-origin standardization baseline: quantile q means Q_q(o) => z=0
+# Per-origin standardization baseline: quantile q means Q_q(o) => z=0 (this one remains a UI slider below)
 BASELINE_Q_DEFAULT = 0.10
 
 # Recertification probability based on group digit mismatch (OPTION 1: max-level mismatch)
@@ -29,11 +29,14 @@ RECERT_BASE_MONTHS_BY_TIER = {
     1: 48.0,  # university
     2: 24.0,  # 4-year college diploma
     3: 12.0,  # 2-year diploma
-    4: 0.0,   # (off by default; can change if you want)
+    4: 0.0,
     5: 0.0,
 }
 
+# ============================================================
 # ---------- Load Data ----------
+# ============================================================
+
 @st.cache_data
 def load_data():
     base_path = os.path.dirname(__file__)
@@ -84,7 +87,6 @@ def load_data():
 
     # ---- Load job-by-province share data (optional) ----
     jobprov_df = pd.DataFrame()
-
     jp_csv = os.path.join(base_path, "job_province_share.csv")
     jp_xlsx = os.path.join(base_path, "job_province_share.xlsx")
 
@@ -138,10 +140,9 @@ def load_data():
     jobprov_df,
 ) = load_data()
 
-
-# =========================
-# Helper Functions
-# =========================
+# ============================================================
+# ---------- Helper Functions ----------
+# ============================================================
 
 def noc_str(code: str) -> str:
     return str(code).zfill(5).strip()
@@ -169,7 +170,7 @@ EDU_MONTHS_MATRIX = np.array([
     [  60, 36, 24, 12,  0],   # origin 5 -> uni / 4yr / 2yr / HS
 ], dtype=float)
 
-EDU_MONTHS_CAP = 60.0  # cap at 5 years
+EDU_MONTHS_CAP = 60.0
 
 
 def expected_tier_upgrade_months(origin_code: str, dest_code: str) -> float:
@@ -241,10 +242,7 @@ def recert_ramp(z_eff: float) -> float:
 
 def expected_recert_months_same_tier(origin: str, dest: str, z_eff: float) -> float:
     """
-    Applies the same recertification logic to tiers 1/2/3 (and optionally others),
-    but ONLY when origin and dest are the SAME education tier.
-
-    Expected recert months:
+    Same-tier only (1->1, 2->2, 3->3, ...):
       min(CAP, base_months[tier] * P(digit mismatch) * ramp(z_eff))
     """
     eo = get_education_level(origin)
@@ -267,8 +265,7 @@ def expected_recert_months_same_tier(origin: str, dest: str, z_eff: float) -> fl
 # --- Option 1: Per-origin shifted standardization (quantile baseline) ---
 def origin_standardized_z(origin_code: str, dest_code: str, q: float):
     """
-    Per-origin shifted z-score:
-      z_q = (d_od - Q_q(o)) / std_o
+    z_q = (d_od - Q_q(o)) / std_o
     """
     if origin_code not in similarity_df.index or dest_code not in similarity_df.columns:
         return None
@@ -277,57 +274,13 @@ def origin_standardized_z(origin_code: str, dest_code: str, q: float):
     if row.empty or dest_code not in row.index:
         return None
 
-    std = float(row.std())  # pandas default ddof=1
+    std = float(row.std())  # ddof=1
     if std == 0.0 or np.isnan(std):
         return None
 
     baseline = float(row.quantile(float(q)))
     d = float(row.loc[dest_code])
     return float((d - baseline) / std)
-
-
-def get_most_and_least_similar(code, n=5):
-    if code not in similarity_df.index:
-        return None, None, None
-    origin_level = get_education_level(code)
-
-    scores = similarity_df.loc[code].drop(code).dropna()
-
-    # Restrict by education distance (output restriction only)
-    allowed = []
-    for c in scores.index:
-        lev = get_education_level(c)
-        if origin_level is not None and lev is not None:
-            if abs(lev - origin_level) <= EDU_GAP:
-                allowed.append(c)
-    scores = scores.loc[allowed] if allowed else scores.iloc[0:0]
-
-    if scores.empty:
-        return [], [], scores
-
-    top_matches = scores.nsmallest(n)
-    bottom_matches = scores.nlargest(n)
-    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
-    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()]
-    return top_results, bottom_results, scores
-
-
-def compare_two_jobs(code1, code2):
-    if code1 not in similarity_df.index or code2 not in similarity_df.index:
-        return None
-    scores = similarity_df.loc[code1].drop(code1).dropna()
-    scores = scores[scores != 0]
-    scores = scores.sort_values()
-    if code2 not in scores.index:
-        return None
-    rank = scores.index.get_loc(code2) + 1
-    total = len(scores)
-    score = similarity_df.loc[code1, code2]
-    if pd.isna(score):
-        score = similarity_df.loc[code2, code1]
-    if pd.isna(score):
-        return None
-    return score, rank, total
 
 
 def training_multiplier(z_eff):
@@ -365,9 +318,106 @@ def geographic_cost(dest_code, province, C_move=20000.0):
     return float(C_move) * p_move
 
 
-# =========================
+def compare_two_jobs(code1, code2):
+    if code1 not in similarity_df.index or code2 not in similarity_df.index:
+        return None
+    scores = similarity_df.loc[code1].drop(code1).dropna()
+    scores = scores[scores != 0]
+    scores = scores.sort_values()
+    if code2 not in scores.index:
+        return None
+    rank = scores.index.get_loc(code2) + 1
+    total = len(scores)
+    score = similarity_df.loc[code1, code2]
+    if pd.isna(score):
+        score = similarity_df.loc[code2, code1]
+    if pd.isna(score):
+        return None
+    return score, rank, total
+
+
+def get_most_and_least_similar(code, n=5):
+    if code not in similarity_df.index:
+        return None, None, None
+    origin_level = get_education_level(code)
+
+    scores = similarity_df.loc[code].drop(code).dropna()
+
+    # Restrict by education distance (output restriction only)
+    allowed = []
+    for c in scores.index:
+        lev = get_education_level(c)
+        if origin_level is not None and lev is not None:
+            if abs(lev - origin_level) <= EDU_GAP:
+                allowed.append(c)
+    scores = scores.loc[allowed] if allowed else scores.iloc[0:0]
+
+    if scores.empty:
+        return [], [], scores
+
+    top_matches = scores.nsmallest(n)
+    bottom_matches = scores.nlargest(n)
+    top_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in top_matches.items()]
+    bottom_results = [(occ, code_to_title.get(occ, "Unknown Title"), score) for occ, score in bottom_matches.items()]
+    return top_results, bottom_results, scores
+
+
+def payback_period_months(cost_usd: float, w_origin: float, w_dest: float):
+    """
+    Months/years needed for destination wage premium to recoup switching cost.
+    If wage gap <= 0, payback is None (no payback via wages).
+    """
+    try:
+        C = float(cost_usd)
+        wo = float(w_origin)
+        wd = float(w_dest)
+    except Exception:
+        return {
+            "wage_gap_monthly": np.nan,
+            "payback_months": None,
+            "payback_years": None,
+            "status": "Missing/invalid wage or cost inputs.",
+        }
+
+    gap = wd - wo
+
+    if C is None or np.isnan(C):
+        return {
+            "wage_gap_monthly": gap,
+            "payback_months": None,
+            "payback_years": None,
+            "status": "Switching cost unavailable.",
+        }
+
+    if C <= 0:
+        return {
+            "wage_gap_monthly": gap,
+            "payback_months": 0.0,
+            "payback_years": 0.0,
+            "status": "No switching cost to recoup.",
+        }
+
+    if gap <= 0:
+        return {
+            "wage_gap_monthly": gap,
+            "payback_months": None,
+            "payback_years": None,
+            "status": "No wage payback (destination wage not higher).",
+        }
+
+    m = C / gap
+    return {
+        "wage_gap_monthly": gap,
+        "payback_months": float(m),
+        "payback_years": float(m / 12.0),
+        "status": "Payback computed from wage gap.",
+    }
+
+
+# ============================================================
 # Calibration (k) — BEFORE adding education effects
-# =========================
+# ============================================================
+
 @st.cache_data(show_spinner=False)
 def compute_calibration_k_cached(
     risky_codes_tuple,
@@ -379,7 +429,6 @@ def compute_calibration_k_cached(
 ):
     """
     IMPORTANT: Calibration uses ONLY the 2-month baseline (no tier-upgrade months and no recert months).
-    Uses quantile-centered per-origin z and hinges only for alpha-power safety.
     """
     risky_codes = list(risky_codes_tuple)
     safe_codes = list(safe_codes_tuple)
@@ -401,8 +450,8 @@ def compute_calibration_k_cached(
             if z_raw is None:
                 continue
 
-            z_eff = max(float(z_raw), 0.0)  # alpha may be fractional
-            base = 2.0 * w_origin  # baseline only
+            z_eff = max(float(z_raw), 0.0)  # alpha fractional safety
+            base = 2.0 * w_origin
             dist_term = 1 + float(beta) * (z_eff ** float(alpha))
             mult = float(training_multiplier(z_eff))
             raw_cost = base * dist_term * mult
@@ -418,9 +467,10 @@ def compute_calibration_k_cached(
     return float(target_usd) / mean_raw, len(pairs)
 
 
-# =========================
+# ============================================================
 # Switching cost functions (tier-upgrade + recert same-tier with ramp+cap)
-# =========================
+# ============================================================
+
 def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2, q=0.10):
     level1 = get_education_level(code1)
     level2 = get_education_level(code2)
@@ -433,7 +483,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2, q=0.10):
     if z_raw is None:
         return None
 
-    z_eff = max(float(z_raw), 0.0)  # alpha fractional safety
+    z_eff = max(float(z_raw), 0.0)
 
     w_origin = code_to_wage.get(code1)
     if w_origin is None or float(w_origin) <= 0:
@@ -476,6 +526,9 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q=0.
         return None
     w_origin = float(w_origin)
 
+    w_dest = code_to_wage.get(dest_code)
+    w_dest = float(w_dest) if (w_dest is not None and float(w_dest) > 0) else np.nan
+
     tier_months = expected_tier_upgrade_months(origin_code, dest_code)
     recert_months = expected_recert_months_same_tier(origin_code, dest_code, z_eff)
     edu_months_total = float(tier_months) + float(recert_months)
@@ -498,18 +551,28 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q=0.
     months_equiv = total / w_origin
     years_equiv = total / (12.0 * w_origin)
 
+    # Payback period
+    pb = None
+    if pd.notnull(w_dest) and float(w_origin) > 0:
+        pb = payback_period_months(total, w_origin, w_dest)
+
     # Diagnostics for recert model
     eo = get_education_level(origin_code)
     ed = get_education_level(dest_code)
     f = group_mismatch_flags(origin_code, dest_code)
-    p_digit = recert_probability_from_digits(origin_code, dest_code) if (eo is not None and ed is not None and eo == ed and float(RECERT_BASE_MONTHS_BY_TIER.get(eo, 0.0)) > 0) else 0.0
+    same_tier = (eo is not None and ed is not None and eo == ed)
+    base_recert = float(RECERT_BASE_MONTHS_BY_TIER.get(eo, 0.0)) if same_tier else 0.0
+    p_digit = recert_probability_from_digits(origin_code, dest_code) if (same_tier and base_recert > 0) else 0.0
     ramp = recert_ramp(z_eff) if p_digit > 0 else 0.0
-    base_recert = float(RECERT_BASE_MONTHS_BY_TIER.get(eo, 0.0)) if (eo is not None and eo == ed) else 0.0
 
     return {
         "Origin": origin_code,
         "Destination": dest_code,
         "Title": code_to_title.get(dest_code, "Unknown Title"),
+
+        "Origin wage ($/mo)": float(w_origin),
+        "Destination wage ($/mo)": float(w_dest) if pd.notnull(w_dest) else np.nan,
+        "Wage gap ($/mo)": float(w_dest - w_origin) if pd.notnull(w_dest) else np.nan,
 
         "Baseline quantile q": float(q),
         "z_raw (quantile-centered)": float(z_raw),
@@ -519,7 +582,6 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q=0.
         "Education tier (dest)": int(ed) if ed is not None else None,
 
         "Tier upgrade months": float(tier_months),
-
         "Recert base months (same-tier)": float(base_recert),
         "P(recert | digits)": float(p_digit),
         "Recert ramp(z_eff)": float(ramp),
@@ -545,6 +607,10 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q=0.
         "Total cost": float(total),
         "Months of origin wages": float(months_equiv),
         "Years of origin wages": float(years_equiv),
+
+        "Payback months (wage gap)": (float(pb["payback_months"]) if (pb and pb["payback_months"] is not None) else np.nan),
+        "Payback years (wage gap)": (float(pb["payback_years"]) if (pb and pb["payback_years"] is not None) else np.nan),
+        "Payback status": (pb["status"] if pb else "Payback not available."),
     }
 
 
@@ -719,9 +785,10 @@ def cost_hist_with_titles(cost_df, value_col, x_title, fmt_start, fmt_end, maxbi
     )
 
 
-# =========================
-# Streamlit App
-# =========================
+# ============================================================
+# ---------- Streamlit App ----------
+# ============================================================
+
 st.set_page_config(page_title="APOLLO", layout="wide")
 st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour Outcomes (APOLLO)")
 
@@ -730,7 +797,6 @@ st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
 
-# Baseline quantile slider is NOT education costing; keep it if useful
 q = st.sidebar.slider(
     "Origin baseline quantile q (Q_q(o) => z=0)",
     min_value=0.0,
@@ -775,6 +841,9 @@ HIST_UNIT = st.sidebar.radio(
     index=0,
 )
 
+n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
+menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+
 # ---------- Risky/Safe sets ----------
 RISKY_THRESHOLD = 0.70
 SAFE_THRESHOLD = 0.70
@@ -806,7 +875,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Calibration k (applied in all costs):** {CALIB_K:.3f}
 - **Standardization:** per-origin quantile-centered z (q = {q:.2f})
 - **IMPORTANT:** k is calibrated using **baseline-only** (2 months, excludes tier-upgrade + recert months)
-- **Recert logic:** same-tier only; ramp+cap enabled (static)
+- **Recert logic:** same-tier only; ramp(z) with cap (static)
 """
     )
 
@@ -820,11 +889,39 @@ with st.expander("Methodology"):
   **min(cap, base_months[tier] × P(digit mismatch) × ramp(z_eff))**,  
   where ramp(z) = 0 below z0={RECERT_Z0:.2f} and 1 above z1={RECERT_Z1:.2f}.  
 - k is calibrated to match **$24,000** average risky→safe transitions using **2-month baseline only** (no education effects in calibration).  
+- **Wage payback** is computed as: switching_cost / max(destination_wage - origin_wage, 0).  
         """
     )
 
-n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+# ============================================================
+# ---------- Pages ----------
+# ============================================================
+
+def add_payback_columns(df: pd.DataFrame, origin_code: str, cost_col_numeric: str):
+    """
+    Adds wage/payback columns to a results dataframe.
+    Expects df to have columns: Code, Title, and a numeric switching cost column.
+    """
+    w_origin = code_to_wage.get(origin_code)
+    w_origin_val = float(w_origin) if (w_origin is not None and float(w_origin) > 0) else np.nan
+
+    df["_w_origin"] = w_origin_val
+    df["_w_dest"] = df["Code"].map(lambda c: code_to_wage.get(noc_str(c)))
+    df["_gap"] = df["_w_dest"] - df["_w_origin"]
+
+    def _pb_row(r):
+        if pd.isnull(r["_w_origin"]) or pd.isnull(r["_w_dest"]):
+            return {"wage_gap_monthly": np.nan, "payback_months": None, "payback_years": None, "status": "Missing wages."}
+        return payback_period_months(r[cost_col_numeric], r["_w_origin"], r["_w_dest"])
+
+    df["_pb"] = df.apply(_pb_row, axis=1)
+
+    df["Destination wage ($/mo)"] = df["_w_dest"].map(lambda v: f"{float(v):,.0f}" if pd.notnull(v) else "N/A")
+    df["Wage gap ($/mo)"] = df["_gap"].map(lambda v: f"{float(v):,.0f}" if pd.notnull(v) else "N/A")
+    df["Payback (months)"] = df["_pb"].map(lambda d: f"{d['payback_months']:.1f}" if (d and d["payback_months"] is not None) else "N/A")
+    df["Payback (years)"] = df["_pb"].map(lambda d: f"{d['payback_years']:.2f}" if (d and d["payback_years"] is not None) else "N/A")
+
+    return df.drop(columns=["_w_origin", "_w_dest", "_gap", "_pb"])
 
 
 # ---------- Look up by code ----------
@@ -834,7 +931,6 @@ if menu == "Look up by code":
         code = noc_str(code)
         if code in similarity_df.index:
             top_results, bottom_results, all_scores = get_most_and_least_similar(code, n=n_results)
-
             w_origin = code_to_wage.get(code)
 
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
@@ -844,6 +940,8 @@ if menu == "Look up by code":
             df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
                 lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
             ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+
+            df_top = add_payback_columns(df_top, origin_code=code, cost_col_numeric="_sc_numeric")
             df_top = df_top.drop(columns=["_sc_numeric"])
             st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -854,6 +952,8 @@ if menu == "Look up by code":
             df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
                 lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
             ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+
+            df_bottom = add_payback_columns(df_bottom, origin_code=code, cost_col_numeric="_sc_numeric")
             df_bottom = df_bottom.drop(columns=["_sc_numeric"])
             st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -862,7 +962,6 @@ if menu == "Look up by code":
                     list(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
                     + list(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
                 )
-
                 decomp_rows = []
                 for dest in shown_codes:
                     d = switching_cost_components(code, dest, beta=beta, alpha=alpha, q=q)
@@ -870,8 +969,7 @@ if menu == "Look up by code":
                         decomp_rows.append(d)
 
                 if decomp_rows:
-                    decomp_df = pd.DataFrame(decomp_rows)
-                    st.dataframe(decomp_df, use_container_width=True)
+                    st.dataframe(pd.DataFrame(decomp_rows), use_container_width=True)
                 else:
                     st.info("No decomposition rows available (likely filtered out by education distance or missing data).")
 
@@ -895,6 +993,9 @@ if menu == "Look up by code":
                     use_container_width=True,
                 )
 
+        else:
+            st.error("❌ Code not found in similarity matrix.")
+
 
 # ---------- Look up by title ----------
 elif menu == "Look up by title":
@@ -915,6 +1016,8 @@ elif menu == "Look up by title":
         df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
             lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
         ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+
+        df_top = add_payback_columns(df_top, origin_code=selected_code, cost_col_numeric="_sc_numeric")
         df_top = df_top.drop(columns=["_sc_numeric"])
         st.dataframe(df_top, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -925,6 +1028,8 @@ elif menu == "Look up by title":
         df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
             lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
         ).map(lambda v: f"{v:.2f}" if pd.notnull(v) else "N/A")
+
+        df_bottom = add_payback_columns(df_bottom, origin_code=selected_code, cost_col_numeric="_sc_numeric")
         df_bottom = df_bottom.drop(columns=["_sc_numeric"])
         st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
@@ -933,7 +1038,6 @@ elif menu == "Look up by title":
                 list(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
                 + list(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
             )
-
             decomp_rows = []
             for dest in shown_codes:
                 d = switching_cost_components(selected_code, dest, beta=beta, alpha=alpha, q=q)
@@ -1013,6 +1117,28 @@ elif menu == "Compare two jobs":
                         f"({years_equiv:.2f} years) of origin wages"
                     )
                 st.info(msg)
+
+                # ---- Wage payback period ----
+                st.subheader("Wage payback period (recoup switching cost via higher earnings)")
+                w_dest = code_to_wage.get(job2_code)
+
+                if w_origin is None or w_dest is None or float(w_origin) <= 0 or float(w_dest) <= 0:
+                    st.info("Payback not available (missing or invalid wage data for one or both occupations).")
+                else:
+                    pb = payback_period_months(cost, float(w_origin), float(w_dest))
+                    st.write(
+                        f"- Origin monthly wage: **${float(w_origin):,.0f}**\n"
+                        f"- Destination monthly wage: **${float(w_dest):,.0f}**\n"
+                        f"- Monthly wage gap (dest − origin): **${pb['wage_gap_monthly']:,.0f}**"
+                    )
+
+                    if pb["payback_months"] is None:
+                        st.info(f"ℹ️ {pb['status']}")
+                    else:
+                        st.success(
+                            f"✅ Estimated payback time: **{pb['payback_months']:.1f} months** "
+                            f"(**{pb['payback_years']:.2f} years**) assuming the wage gap persists."
+                        )
 
                 with st.expander("Switching cost decomposition (details)", expanded=False):
                     d = switching_cost_components(job1_code, job2_code, beta=beta, alpha=alpha, q=q)
