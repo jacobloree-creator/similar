@@ -90,14 +90,10 @@ def load_data():
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
 
-    # ---- Standardize distances (z-scores) ----
-    flat_scores = similarity_df.where(~pd.isna(similarity_df)).stack().values
-    mean_val, std_val = flat_scores.mean(), flat_scores.std()
-    standardized_df = (similarity_df - mean_val) / std_val
+    # NOTE: Standardization is now PER-ORIGIN and computed on-the-fly, so no global standardized_df is created.
 
     return (
         similarity_df,
-        standardized_df,
         code_to_title,
         title_to_code,
         code_to_wage,
@@ -108,7 +104,6 @@ def load_data():
 
 (
     similarity_df,
-    standardized_df,
     code_to_title,
     title_to_code,
     code_to_wage,
@@ -155,6 +150,29 @@ def expected_education_months(origin_code: str, dest_code: str) -> float:
         return 0.0
     m = float(EDU_MONTHS_MATRIX[eo - 1, ed - 1])
     return float(min(m, EDU_MONTHS_CAP))
+
+
+# --- NEW: per-origin standardization helper ---
+def origin_standardized_z(origin_code: str, dest_code: str):
+    """
+    Per-origin z-score:
+      z = (d_od - mean_o) / std_o
+    computed from the origin's row distribution of destination distances.
+    """
+    if origin_code not in similarity_df.index or dest_code not in similarity_df.columns:
+        return None
+
+    row = similarity_df.loc[origin_code].dropna()
+    if row.empty or dest_code not in row.index:
+        return None
+
+    std = float(row.std())
+    if std == 0.0 or np.isnan(std):
+        return None
+
+    mean = float(row.mean())
+    d = float(row.loc[dest_code])
+    return float((d - mean) / std)
 
 
 def get_most_and_least_similar(code, n=5):
@@ -236,26 +254,23 @@ def geographic_cost(dest_code, province, C_move=20000.0):
 def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
     """
     Calibration uses ONLY the 2-month baseline (no education months in calibration),
-    so k remains comparable to earlier versions.
+    and per-origin z-scores.
     """
     pairs = []
     for r in risky_codes:
-        if r not in standardized_df.index:
-            continue
         w_origin = code_to_wage.get(r)
         if w_origin is None:
             continue
+
         for s in safe_codes:
-            if s == r or s not in standardized_df.index:
+            if s == r:
                 continue
 
-            z = standardized_df.loc[r, s]
-            if pd.isna(z):
-                z = standardized_df.loc[s, r]
-            if pd.isna(z):
+            z = origin_standardized_z(r, s)
+            if z is None:
                 continue
 
-            base = 2.0 * float(w_origin)  # <-- baseline only
+            base = 2.0 * float(w_origin)  # baseline only
             dist_term = 1 + beta * (abs(float(z)) ** alpha)
             mult = float(training_multiplier(z))
             raw_cost = base * dist_term * mult
@@ -279,13 +294,8 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     if abs(level1 - level2) > EDU_GAP:
         return None
 
-    if code1 not in standardized_df.index or code2 not in standardized_df.index:
-        return None
-
-    z = standardized_df.loc[code1, code2]
-    if pd.isna(z):
-        z = standardized_df.loc[code2, code1]
-    if pd.isna(z):
+    z = origin_standardized_z(code1, code2)
+    if z is None:
         return None
 
     w_origin = code_to_wage.get(code1)
@@ -294,7 +304,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     w_origin = float(w_origin)
 
     edu_months = expected_education_months(code1, code2)
-    base = (2.0 + float(edu_months)) * w_origin  # <-- Option 2
+    base = (2.0 + float(edu_months)) * w_origin  # Option 2
 
     dist_term = 1 + beta * (abs(float(z)) ** alpha)
     mult = float(training_multiplier(z))
@@ -315,13 +325,9 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
         return None
     if abs(level1 - level2) > EDU_GAP:
         return None
-    if origin_code not in standardized_df.index or dest_code not in standardized_df.index:
-        return None
 
-    z = standardized_df.loc[origin_code, dest_code]
-    if pd.isna(z):
-        z = standardized_df.loc[dest_code, origin_code]
-    if pd.isna(z):
+    z = origin_standardized_z(origin_code, dest_code)
+    if z is None:
         return None
 
     w_origin = code_to_wage.get(origin_code)
@@ -596,7 +602,7 @@ if USE_GEO:
             "Geographic cost selected, but no job_province_share file found. Geographic component will be treated as zero."
         )
 
-# --- NEW: toggle for histogram units ---
+# Toggle for histogram units
 HIST_UNIT = st.sidebar.radio(
     "Switching cost histogram units",
     options=["Dollars ($)", "Years of origin wages"],
@@ -612,6 +618,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Risky→Safe pairs used for k:** {CALIB_PAIRS}
 - **Calibration k (always applied):** {CALIB_K:.3f}
 - **Geo data loaded:** {'Yes' if (jobprov_df is not None and not jobprov_df.empty) else 'No'}
+- **Standardization:** per-origin z-scores (computed from each origin’s destination distribution)
 - **Education months matrix:** credential-heavy (Option 2 folded into base)
 """
     )
@@ -621,7 +628,8 @@ with st.expander("Methodology"):
         """
 - Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
 - Switching costs are scaled by **(2 + expected education months)** of origin wages and adjusted for skill distance using a non-linear term and a training multiplier.  
-- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000** (using the full universe of occupations).  
+- Dissimilarity is standardized **within each origin occupation’s distribution of destinations** (per-origin z-scores).  
+- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000**.  
 - Displayed results restrict possible transitions to those within a chosen education-distance threshold (thousands digit of the NOC).  
         """
     )
@@ -629,13 +637,17 @@ with st.expander("Methodology"):
         r"""
 \text{SkillCost}
 = k \cdot \left((2 + T_{edu})\,w_o\right)
-  \cdot \left(1 + \beta\,|z|^{\alpha}\right)
-  \cdot m(|z|)
+  \cdot \left(1 + \beta\,|z_{o\to d}|^{\alpha}\right)
+  \cdot m(|z_{o\to d}|)
 """
     )
     st.markdown(
         r"""
-- Here, \( T_{edu} \) is expected additional months from the education transition matrix (capped at 60 months).  
+- Here, \( z_{o\to d} \) is a **per-origin** standardized distance:
+  \[
+    z_{o\to d} = \frac{d_{o\to d} - \mu_o}{\sigma_o}.
+  \]
+- \( T_{edu} \) is expected additional months from the education transition matrix (capped at 60 months).  
 - \( m(|z|) \in \{1.0,\,1.2,\,1.5,\,2.0\} \).  
 - Optionally, a geographic mobility component is added:  
   \[
@@ -838,7 +850,6 @@ elif menu == "Look up by title":
         st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
         st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-        # Switching cost histogram (toggle)
         costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha)
         if HIST_UNIT == "Dollars ($)":
             st.subheader(f"Switching Cost Distribution (Dollars) from {selected_code} – {selected_title}")
@@ -944,10 +955,3 @@ elif menu == "Compare two jobs":
                 )
         else:
             st.error("❌ Could not compare occupations.")
-
-
-
-# (Global variables referenced in helper functions)
-# Streamlit executes top-to-bottom; these are defined after sidebar.
-# They are declared here for linting clarity only:
-# EDU_GAP, USE_GEO, USER_PROVINCE, GEO_C_MOVE, GEO_LAMBDA, CALIB_K, CALIB_PAIRS
