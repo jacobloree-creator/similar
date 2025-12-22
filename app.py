@@ -9,11 +9,15 @@ import numpy as np
 # =========================
 BASELINE_Q = 0.10  # per-origin quantile baseline (q-quantile distance => z=0)
 
-# Recertification defaults (uni->uni expected months = 48 * P(recert))
+# Recertification defaults (uni->uni expected months = base * P(recert) * ramp(z_eff), capped)
 RECERT_BASE_MONTHS_UNI = 48
 P_RECERT_FIRST = 0.80
 P_RECERT_THIRD = 0.35
 P_RECERT_FOURTH = 0.10
+
+RECERT_Z0 = 0.30     # ramp start
+RECERT_Z1 = 1.20     # ramp full strength
+RECERT_CAP_MONTHS = 18  # cap expected months to prevent explosions
 
 # ---------- Load Data ----------
 @st.cache_data
@@ -130,10 +134,7 @@ def noc_str(code: str) -> str:
 
 def get_education_level(noc_code):
     """
-    Thousands digit by your convention (second digit of 5-digit code).
-    Example: 14110 -> 4
-
-    IMPORTANT: This digit is your education tier where
+    2nd digit of 5-digit code (index 1) is your education tier:
       1=university, 2=4yr college, 3=2yr college, 4=high school, 5=no education required
     """
     try:
@@ -187,7 +188,7 @@ def group_mismatch_flags(origin: str, dest: str):
     }
 
 
-def recert_probability(origin: str, dest: str) -> float:
+def recert_probability_from_digits(origin: str, dest: str) -> float:
     """
     OPTION 1 (max-level mismatch):
       - if 1st differs => high probability
@@ -205,18 +206,35 @@ def recert_probability(origin: str, dest: str) -> float:
     return 0.0
 
 
-def expected_recert_months_uni_to_uni(origin: str, dest: str) -> float:
+def recert_ramp(z_eff: float) -> float:
+    """
+    Smooth linear ramp:
+      0 at z<=RECERT_Z0
+      1 at z>=RECERT_Z1
+      linear in between
+    """
+    z = float(z_eff)
+    if z <= float(RECERT_Z0):
+        return 0.0
+    if z >= float(RECERT_Z1):
+        return 1.0
+    return float((z - float(RECERT_Z0)) / (float(RECERT_Z1) - float(RECERT_Z0)))
+
+
+def expected_recert_months_uni_to_uni(origin: str, dest: str, z_eff: float) -> float:
     """
     Expected recertification months for university->university switches:
-      months = RECERT_BASE_MONTHS_UNI * P(recert | mismatch level)
+      months = min(CAP, RECERT_BASE_MONTHS_UNI * P(digit mismatch) * ramp(z_eff))
 
     Applies ONLY if both tiers are university (tier==1).
     """
     if get_education_level(origin) != 1 or get_education_level(dest) != 1:
         return 0.0
-    p = recert_probability(origin, dest)
-    m = float(RECERT_BASE_MONTHS_UNI) * float(p)
-    return float(max(0.0, m))
+
+    p = recert_probability_from_digits(origin, dest)
+    r = recert_ramp(z_eff)
+    m = float(RECERT_BASE_MONTHS_UNI) * float(p) * float(r)
+    return float(min(float(RECERT_CAP_MONTHS), max(0.0, m)))
 
 
 # --- Option 1: Per-origin shifted standardization (quantile baseline) ---
@@ -224,9 +242,6 @@ def origin_standardized_z(origin_code: str, dest_code: str, q: float = None):
     """
     Per-origin shifted z-score:
       z_q = (d_od - Q_q(o)) / std_o
-
-    Q_q(o) is the q-quantile of the origin's destination-distance distribution.
-    This keeps per-origin scaling (std_o) but moves the zero point.
     """
     if q is None:
         q = BASELINE_Q
@@ -294,7 +309,6 @@ def compare_two_jobs(code1, code2):
 def training_multiplier(z_eff):
     """
     One-sided bins, expects z_eff >= 0.
-    (We hinge z only where needed for alpha fractional power safety.)
     """
     z = float(z_eff)
     if z < 0.5:
@@ -340,8 +354,7 @@ def compute_calibration_k_cached(
     q=0.10,
 ):
     """
-    IMPORTANT: Calibration uses ONLY the 2-month baseline (no tier-upgrade months and no recertification months).
-    Uses quantile-centered per-origin z and hinges only for alpha-power safety.
+    IMPORTANT: Calibration uses ONLY the 2-month baseline (no tier-upgrade months and no recert months).
     """
     risky_codes = list(risky_codes_tuple)
     safe_codes = list(safe_codes_tuple)
@@ -403,7 +416,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2, q: float = None
     w_origin = float(w_origin)
 
     tier_months = expected_tier_upgrade_months(code1, code2)
-    recert_months = expected_recert_months_uni_to_uni(code1, code2)
+    recert_months = expected_recert_months_uni_to_uni(code1, code2, z_eff)
     edu_months_total = float(tier_months) + float(recert_months)
 
     base = (2.0 + edu_months_total) * w_origin
@@ -439,7 +452,7 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q: f
     w_origin = float(w_origin)
 
     tier_months = expected_tier_upgrade_months(origin_code, dest_code)
-    recert_months = expected_recert_months_uni_to_uni(origin_code, dest_code)
+    recert_months = expected_recert_months_uni_to_uni(origin_code, dest_code, z_eff)
     edu_months_total = float(tier_months) + float(recert_months)
 
     base = (2.0 + edu_months_total) * w_origin
@@ -461,7 +474,8 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q: f
     years_equiv = total / (12.0 * w_origin)
 
     f = group_mismatch_flags(origin_code, dest_code)
-    p_recert = recert_probability(origin_code, dest_code) if (get_education_level(origin_code) == 1 and get_education_level(dest_code) == 1) else 0.0
+    p_digit = recert_probability_from_digits(origin_code, dest_code) if (get_education_level(origin_code) == 1 and get_education_level(dest_code) == 1) else 0.0
+    ramp = recert_ramp(z_eff) if (get_education_level(origin_code) == 1 and get_education_level(dest_code) == 1) else 0.0
 
     return {
         "Origin": origin_code,
@@ -473,12 +487,16 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q: f
         "z_eff (hinged for cost)": float(z_eff),
 
         "Tier upgrade months": float(tier_months),
+
         "Recert base months (uni→uni)": float(RECERT_BASE_MONTHS_UNI) if (get_education_level(origin_code) == 1 and get_education_level(dest_code) == 1) else 0.0,
-        "P(recert | group mismatch)": float(p_recert),
+        "P(recert | digits)": float(p_digit),
+        "Recert ramp(z_eff)": float(ramp),
+        "Recert cap (months)": float(RECERT_CAP_MONTHS),
         "Group diff (1st)": int(f["diff_1st"]),
         "Group diff (3rd)": int(f["diff_3rd"]),
         "Group diff (4th)": int(f["diff_4th"]),
         "Expected recert months (uni→uni)": float(recert_months),
+
         "Education/credential months (total)": float(edu_months_total),
 
         "Base ((2+edu_total)×origin wage)": float(base),
@@ -499,7 +517,6 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q: f
 
 
 def compute_switching_costs_from_origin(origin_code, beta, alpha, q: float = None):
-    """Returns a dataframe with both $ cost and years-of-origin-wages cost for all allowed destinations."""
     rows = []
     origin_level = get_education_level(origin_code)
     w_origin = code_to_wage.get(origin_code)
@@ -727,11 +744,11 @@ HIST_UNIT = st.sidebar.radio(
 )
 
 # =========================
-# Recertification controls (uni->uni only)
+# Recertification controls (uni->uni only): ramp + cap
 # =========================
-st.sidebar.subheader("Recertification (uni→uni expected months)")
+st.sidebar.subheader("Recertification (uni→uni): ramp + cap")
 RECERT_BASE_MONTHS_UNI = st.sidebar.slider(
-    "Base recert months if recert required (uni→uni)",
+    "Base months if recert required (uni→uni)",
     min_value=0,
     max_value=60,
     value=int(RECERT_BASE_MONTHS_UNI),
@@ -759,6 +776,28 @@ P_RECERT_FOURTH = st.sidebar.slider(
     step=0.05,
 )
 
+RECERT_Z0 = st.sidebar.slider(
+    "Ramp start (z0): recert=0 at/below",
+    min_value=0.0,
+    max_value=2.0,
+    value=float(RECERT_Z0),
+    step=0.05,
+)
+RECERT_Z1 = st.sidebar.slider(
+    "Ramp full (z1): recert full strength at/above",
+    min_value=0.1,
+    max_value=3.0,
+    value=float(RECERT_Z1),
+    step=0.05,
+)
+RECERT_CAP_MONTHS = st.sidebar.slider(
+    "Cap expected recert months",
+    min_value=0,
+    max_value=48,
+    value=int(RECERT_CAP_MONTHS),
+    step=1,
+)
+
 # ---------- Risky/Safe sets ----------
 RISKY_THRESHOLD = 0.70
 SAFE_THRESHOLD = 0.70
@@ -770,7 +809,7 @@ if code_to_roa:
 else:
     RISKY_CODES, SAFE_CODES = set(), set()
 
-# ---------- Calibration (k) computed BEFORE additional education effects ----------
+# ---------- Calibration (k) computed BEFORE education effects ----------
 CALIB_K, CALIB_PAIRS = compute_calibration_k_cached(
     tuple(sorted(RISKY_CODES)),
     tuple(sorted(SAFE_CODES)),
@@ -788,9 +827,8 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Safe codes (ROA < 0.70):** {len(SAFE_CODES)}
 - **Risky→Safe pairs used for k:** {CALIB_PAIRS}
 - **Calibration k (applied in all costs):** {CALIB_K:.3f}
-- **Geo data loaded:** {'Yes' if (jobprov_df is not None and not jobprov_df.empty) else 'No'}
 - **Standardization:** per-origin quantile-centered z (q = {BASELINE_Q:.2f})
-- **IMPORTANT:** k is calibrated using a **2-month baseline only** (no tier-upgrade or recert months)
+- **IMPORTANT:** k is calibrated using a **2-month baseline only** (calibration excludes tier-upgrade and recert months)
 """
     )
 
@@ -798,26 +836,16 @@ with st.expander("Methodology"):
     st.markdown(
         """
 - Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
-- Distances are standardized **within each origin occupation’s distribution of destinations**, centered at an **origin-specific quantile** (baseline).  
-- **Tier-upgrading months** are derived from your education-tier matrix.  
-- **Recertification months (uni→uni only)** are modeled as **48 months × P(recert)**, where P(recert) depends on NOC group digit differences (1st > 3rd > 4th).  
-- Switching costs are scaled by **(2 + tier_months + expected_recert_months)** of origin wages and adjusted by a distance term and training multiplier.  
-- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000** under a **2-month baseline only** (calibration excludes education effects).  
+- Distances are standardized within each origin occupation’s destination distribution and centered at an origin-specific quantile.  
+- **Tier-upgrading months** come from your education-tier matrix.  
+- **Recertification months (uni→uni only)** are modeled as:  
+  **min(cap, base_months × P(digit mismatch) × ramp(z))**, where ramp(z) is 0 below z0 and 1 above z1.  
+- k is calibrated to match **$24,000** average risky→safe transitions using **baseline-only** (2 months, no education effects).  
         """
-    )
-    st.latex(r"""z_{o\to d}(q)=\frac{dist(o,d)-Q_q(o)}{\sigma_o}""")
-    st.latex(
-        r"""
-\text{SkillCost}
-= k \cdot \left((2 + T_{tier} + T_{recert})\,w_o\right)
-  \cdot \left(1 + \beta\,\max(z_{o\to d}(q),0)^{\alpha}\right)
-  \cdot m(\max(z_{o\to d}(q),0))
-"""
     )
 
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
 menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
-
 
 # ---------- Look up by code ----------
 if menu == "Look up by code":
@@ -860,53 +888,9 @@ if menu == "Look up by code":
                         decomp_rows.append(d)
 
                 if decomp_rows:
-                    decomp_df = pd.DataFrame(decomp_rows)
-                    preferred_cols = [
-                        "Origin", "Destination", "Title",
-                        "Baseline quantile q",
-                        "z_raw (quantile-centered)", "z_eff (hinged for cost)",
-                        "Tier upgrade months",
-                        "Recert base months (uni→uni)",
-                        "P(recert | group mismatch)",
-                        "Group diff (1st)", "Group diff (3rd)", "Group diff (4th)",
-                        "Expected recert months (uni→uni)",
-                        "Education/credential months (total)",
-                        "Base ((2+edu_total)×origin wage)",
-                        "Distance term", "Training mult", "k (calibration)",
-                        "Skill cost", "Geo add", "Total cost",
-                        "Months of origin wages", "Years of origin wages",
-                    ]
-                    decomp_df = decomp_df[[c for c in preferred_cols if c in decomp_df.columns]]
-
-                    money_cols = ["Base ((2+edu_total)×origin wage)", "Skill cost", "Geo add", "Total cost"]
-                    for c in money_cols:
-                        if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):,.2f}")
-
-                    for c in ["Baseline quantile q", "z_raw (quantile-centered)", "z_eff (hinged for cost)", "Distance term", "k (calibration)"]:
-                        if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.3f}")
-
-                    for c in ["P(recert | group mismatch)"]:
-                        if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.2f}")
-
-                    for c in ["Training mult"]:
-                        if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.2f}")
-
-                    for c in ["Tier upgrade months", "Recert base months (uni→uni)", "Expected recert months (uni→uni)", "Education/credential months (total)"]:
-                        if c in decomp_df.columns:
-                            decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.0f}")
-
-                    if "Months of origin wages" in decomp_df.columns:
-                        decomp_df["Months of origin wages"] = decomp_df["Months of origin wages"].map(lambda v: f"{float(v):.1f}")
-                    if "Years of origin wages" in decomp_df.columns:
-                        decomp_df["Years of origin wages"] = decomp_df["Years of origin wages"].map(lambda v: f"{float(v):.2f}")
-
-                    st.dataframe(decomp_df, use_container_width=True)
+                    st.dataframe(pd.DataFrame(decomp_rows), use_container_width=True)
                 else:
-                    st.info("No decomposition rows available (likely filtered out by education distance or missing data).")
+                    st.info("No decomposition rows available (filtered out or missing data).")
 
             st.subheader(f"Similarity Score Distribution for {code} – {code_to_title.get(code,'Unknown')}")
             st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
@@ -915,14 +899,12 @@ if menu == "Look up by code":
             costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha, q=BASELINE_Q)
             if HIST_UNIT == "Dollars ($)":
                 st.subheader(f"Switching Cost Distribution (Dollars) from {code} – {code_to_title.get(code,'Unknown')}")
-                st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
                 st.altair_chart(
                     cost_hist_with_titles(costs_df, value_col="cost", x_title="Switching Cost ($)", fmt_start=",.0f", fmt_end=",.0f"),
                     use_container_width=True,
                 )
             else:
                 st.subheader(f"Switching Cost Distribution (Years of origin wages) from {code} – {code_to_title.get(code,'Unknown')}")
-                st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
                 st.altair_chart(
                     cost_hist_with_titles(costs_df, value_col="years", x_title="Years of origin wages", fmt_start=".2f", fmt_end=".2f"),
                     use_container_width=True,
@@ -960,41 +942,8 @@ elif menu == "Look up by title":
         df_bottom = df_bottom.drop(columns=["_sc_numeric"])
         st.dataframe(df_bottom, use_container_width=True, column_config={"Title": st.column_config.Column(width="large")})
 
-        with st.expander("Switching cost decomposition (details)", expanded=False):
-            shown_codes = list(pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str)) + \
-                          list(pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])["Code"].astype(str))
-
-            decomp_rows = []
-            for dest in shown_codes:
-                d = switching_cost_components(selected_code, dest, beta=beta, alpha=alpha, q=BASELINE_Q)
-                if d is not None:
-                    decomp_rows.append(d)
-
-            if decomp_rows:
-                decomp_df = pd.DataFrame(decomp_rows)
-                st.dataframe(decomp_df, use_container_width=True)
-            else:
-                st.info("No decomposition rows available (likely filtered out by education distance or missing data).")
-
         st.subheader(f"Similarity Score Distribution for {selected_code} – {selected_title}")
-        st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
         st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
-
-        costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha, q=BASELINE_Q)
-        if HIST_UNIT == "Dollars ($)":
-            st.subheader(f"Switching Cost Distribution (Dollars) from {selected_code} – {selected_title}")
-            st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
-            st.altair_chart(
-                cost_hist_with_titles(costs_df, value_col="cost", x_title="Switching Cost ($)", fmt_start=",.0f", fmt_end=",.0f"),
-                use_container_width=True,
-            )
-        else:
-            st.subheader(f"Switching Cost Distribution (Years of origin wages) from {selected_code} – {selected_title}")
-            st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
-            st.altair_chart(
-                cost_hist_with_titles(costs_df, value_col="years", x_title="Years of origin wages", fmt_start=".2f", fmt_end=".2f"),
-                use_container_width=True,
-            )
 
 # ---------- Compare two jobs ----------
 elif menu == "Compare two jobs":
@@ -1017,44 +966,17 @@ elif menu == "Compare two jobs":
                 f"**Comparison Result:**\n\n"
                 f"- {job1_code} ({job1_title}) vs {job2_code} ({job2_title})\n"
                 f"- Similarity score (raw distance): `{score:.4f}`\n"
-                f"- Ranking: `{rank}` out of `{total}` occupations (#{rank} most similar to {job1_code})"
+                f"- Ranking: `{rank}` out of `{total}` occupations"
             )
 
             if cost is not None:
                 w_origin = code_to_wage.get(job1_code)
-                months_equiv = None
-                years_equiv = None
                 if w_origin is not None and float(w_origin) > 0:
                     w_origin = float(w_origin)
                     months_equiv = cost / w_origin
                     years_equiv = cost / (12.0 * w_origin)
-
-                extra_geo = ""
-                if USE_GEO and USER_PROVINCE is not None:
-                    extra_geo = f" (includes geographic mobility component for {USER_PROVINCE})"
-
-                msg = (
-                    f"💰 **Estimated Switching Cost** (from {job1_code} to {job2_code}): "
-                    f"`${cost:,.2f}` (education distance ≤ {EDU_GAP}){extra_geo}\n\n"
-                )
-                if years_equiv is not None:
-                    msg += (
-                        f"📆 **Equivalent to:** {months_equiv:.1f} months "
-                        f"({years_equiv:.2f} years) of origin wages"
-                    )
-                st.info(msg)
-
-                with st.expander("Switching cost decomposition (details)", expanded=False):
-                    d = switching_cost_components(job1_code, job2_code, beta=beta, alpha=alpha, q=BASELINE_Q)
-                    if d is None:
-                        st.info("No decomposition available (filtered out or missing data).")
-                    else:
-                        st.dataframe(pd.DataFrame([d]), use_container_width=True)
-
-            else:
-                st.info(
-                    "ℹ️ Switching cost is not reported because the two occupations are further apart in education "
-                    f"than the allowed maximum distance ({EDU_GAP})."
-                )
+                    st.info(f"💰 Switching cost: `${cost:,.2f}` ≈ {months_equiv:.1f} months ({years_equiv:.2f} years) of origin wages")
+                else:
+                    st.info(f"💰 Switching cost: `${cost:,.2f}`")
         else:
             st.error("❌ Could not compare occupations.")
