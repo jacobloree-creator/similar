@@ -4,6 +4,11 @@ import os
 import altair as alt
 import numpy as np
 
+# =========================
+# Defaults (overridden by sidebar)
+# =========================
+BASELINE_Q = 0.10  # Option 1: per-origin quantile baseline (q-quantile distance => z=0)
+
 # ---------- Load Data ----------
 @st.cache_data
 def load_data():
@@ -90,7 +95,6 @@ def load_data():
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
 
-    # NOTE: Standardization is per-origin and computed on-the-fly, so no global standardized_df is created.
     return (
         similarity_df,
         code_to_title,
@@ -110,7 +114,9 @@ def load_data():
     jobprov_df,
 ) = load_data()
 
-# ---------- Helper Functions ----------
+# =========================
+# Helper Functions
+# =========================
 
 def get_education_level(noc_code):
     """
@@ -151,13 +157,19 @@ def expected_education_months(origin_code: str, dest_code: str) -> float:
     return float(min(m, EDU_MONTHS_CAP))
 
 
-# --- Per-origin standardization helper ---
-def origin_standardized_z(origin_code: str, dest_code: str):
+# --- Option 1: Per-origin shifted standardization (quantile baseline) ---
+def origin_standardized_z(origin_code: str, dest_code: str, q: float = None):
     """
-    Per-origin z-score:
-      z = (d_od - mean_o) / std_o
-    computed from the origin's row distribution of destination distances.
+    Per-origin shifted z-score:
+      z_q = (d_od - Q_q(o)) / std_o
+
+    Q_q(o) is the q-quantile of the origin's destination-distance distribution.
+    This keeps per-origin scaling (std_o) but moves the zero point so most destinations are non-negative
+    (for small q like 0.10 or 0.25).
     """
+    if q is None:
+        q = BASELINE_Q
+
     if origin_code not in similarity_df.index or dest_code not in similarity_df.columns:
         return None
 
@@ -165,13 +177,13 @@ def origin_standardized_z(origin_code: str, dest_code: str):
     if row.empty or dest_code not in row.index:
         return None
 
-    std = float(row.std())
+    std = float(row.std())  # pandas default ddof=1
     if std == 0.0 or np.isnan(std):
         return None
 
-    mean = float(row.mean())
+    baseline = float(row.quantile(q))
     d = float(row.loc[dest_code])
-    return float((d - mean) / std)
+    return float((d - baseline) / std)
 
 
 def get_most_and_least_similar(code, n=5):
@@ -218,9 +230,12 @@ def compare_two_jobs(code1, code2):
     return score, rank, total
 
 
-def training_multiplier(z_score):
-    # OPTION 2: one-sided penalty -> use max(z, 0) everywhere (no penalty for "easier than average" destinations)
-    z = max(float(z_score), 0.0)
+def training_multiplier(z_eff):
+    """
+    One-sided bins, but expects z_eff >= 0.
+    (We still hinge for cost math safety when alpha is fractional.)
+    """
+    z = float(z_eff)
     if z < 0.5:
         return 1.0
     elif z < 1.0:
@@ -251,30 +266,47 @@ def geographic_cost(dest_code, province, C_move=20000.0):
     return float(C_move) * p_move
 
 
-def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14, alpha=1.2):
+@st.cache_data(show_spinner=False)
+def compute_calibration_k_cached(
+    risky_codes_tuple,
+    safe_codes_tuple,
+    target_usd=24000.0,
+    beta=0.14,
+    alpha=1.2,
+    q=0.10,
+):
     """
     Calibration uses ONLY the 2-month baseline (no education months in calibration),
-    per-origin z-scores, and one-sided penalty (max(z,0)).
+    per-origin quantile-centered z, and a one-sided hinge on z only for math safety (alpha can be fractional).
+
+    We cache this because it can be expensive.
     """
+    risky_codes = list(risky_codes_tuple)
+    safe_codes = list(safe_codes_tuple)
+
     pairs = []
     for r in risky_codes:
         w_origin = code_to_wage.get(r)
         if w_origin is None:
+            continue
+        w_origin = float(w_origin)
+        if w_origin <= 0:
             continue
 
         for s in safe_codes:
             if s == r:
                 continue
 
-            z_raw = origin_standardized_z(r, s)
+            z_raw = origin_standardized_z(r, s, q=q)
             if z_raw is None:
                 continue
 
-            z_pos = max(float(z_raw), 0.0)
+            # We can have some negative z_raw (below baseline quantile). For alpha fractional, hinge for power.
+            z_eff = max(float(z_raw), 0.0)
 
-            base = 2.0 * float(w_origin)  # baseline only
-            dist_term = 1 + beta * (z_pos ** alpha)  # one-sided: only above-mean distances penalized
-            mult = float(training_multiplier(z_raw))
+            base = 2.0 * w_origin  # baseline only
+            dist_term = 1 + beta * (z_eff ** alpha)
+            mult = float(training_multiplier(z_eff))
             raw_cost = base * dist_term * mult
             pairs.append(raw_cost)
 
@@ -288,7 +320,7 @@ def compute_calibration_k(risky_codes, safe_codes, target_usd=24000.0, beta=0.14
     return float(target_usd) / mean_raw, len(pairs)
 
 
-def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
+def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2, q: float = None):
     level1 = get_education_level(code1)
     level2 = get_education_level(code2)
     if level1 is None or level2 is None:
@@ -296,11 +328,12 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     if abs(level1 - level2) > EDU_GAP:
         return None
 
-    z_raw = origin_standardized_z(code1, code2)
+    z_raw = origin_standardized_z(code1, code2, q=q)
     if z_raw is None:
         return None
 
-    z_pos = max(float(z_raw), 0.0)  # OPTION 2: one-sided penalty
+    # For fractional alpha, we must avoid negative values under power:
+    z_eff = max(float(z_raw), 0.0)
 
     w_origin = code_to_wage.get(code1)
     if w_origin is None or float(w_origin) <= 0:
@@ -308,10 +341,10 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
     w_origin = float(w_origin)
 
     edu_months = expected_education_months(code1, code2)
-    base = (2.0 + float(edu_months)) * w_origin  # Option 2
+    base = (2.0 + float(edu_months)) * w_origin
 
-    dist_term = 1 + beta * (z_pos ** alpha)  # one-sided
-    mult = float(training_multiplier(z_raw))  # bins also one-sided via training_multiplier()
+    dist_term = 1 + beta * (z_eff ** alpha)
+    mult = float(training_multiplier(z_eff))
 
     skill_cost = float(CALIB_K) * base * dist_term * mult
 
@@ -322,7 +355,7 @@ def calculate_switching_cost(code1, code2, beta=0.14, alpha=1.2):
         return float(skill_cost)
 
 
-def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
+def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q: float = None):
     level1 = get_education_level(origin_code)
     level2 = get_education_level(dest_code)
     if level1 is None or level2 is None:
@@ -330,11 +363,11 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     if abs(level1 - level2) > EDU_GAP:
         return None
 
-    z_raw = origin_standardized_z(origin_code, dest_code)
+    z_raw = origin_standardized_z(origin_code, dest_code, q=q)
     if z_raw is None:
         return None
 
-    z_pos = max(float(z_raw), 0.0)  # OPTION 2
+    z_eff = max(float(z_raw), 0.0)
 
     w_origin = code_to_wage.get(origin_code)
     if w_origin is None or float(w_origin) <= 0:
@@ -344,8 +377,8 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     edu_months = expected_education_months(origin_code, dest_code)
     base = (2.0 + float(edu_months)) * w_origin
 
-    dist_term = 1 + beta * (z_pos ** alpha)  # one-sided
-    mult = float(training_multiplier(z_raw))  # one-sided bins
+    dist_term = 1 + beta * (z_eff ** alpha)
+    mult = float(training_multiplier(z_eff))
 
     skill_uncalibrated = base * dist_term * mult
     skill_cost = float(CALIB_K) * skill_uncalibrated
@@ -365,8 +398,9 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
         "Origin": origin_code,
         "Destination": dest_code,
         "Title": code_to_title.get(dest_code, "Unknown Title"),
-        "z_raw": float(z_raw),
-        "z_pos (max(z,0))": float(z_pos),
+        "Baseline quantile q": float(BASELINE_Q),
+        "z_raw (quantile-centered)": float(z_raw),
+        "z_eff (hinged for cost)": float(z_eff),
         "Education months": float(edu_months),
         "Base ((2+edu)×origin wage)": float(base),
         "Distance term": float(dist_term),
@@ -382,7 +416,7 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2):
     }
 
 
-def compute_switching_costs_from_origin(origin_code, beta, alpha):
+def compute_switching_costs_from_origin(origin_code, beta, alpha, q: float = None):
     """Returns a dataframe with both $ cost and years-of-origin-wages cost for all allowed destinations."""
     rows = []
     origin_level = get_education_level(origin_code)
@@ -397,7 +431,7 @@ def compute_switching_costs_from_origin(origin_code, beta, alpha):
         if abs(lev - origin_level) > EDU_GAP:
             continue
 
-        cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha)
+        cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha, q=q)
         if pd.notnull(cost):
             years = np.nan
             if w_origin is not None and float(w_origin) > 0:
@@ -553,20 +587,9 @@ def cost_hist_with_titles(cost_df, value_col, x_title, fmt_start, fmt_end, maxbi
     )
 
 
-# ---------- Risky/Safe sets & calibration ----------
-RISKY_THRESHOLD = 0.70
-SAFE_THRESHOLD = 0.70
-
-available_nocs = set(similarity_df.index) & set(code_to_wage.keys())
-if code_to_roa:
-    RISKY_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] >= RISKY_THRESHOLD}
-    SAFE_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] < SAFE_THRESHOLD}
-else:
-    RISKY_CODES, SAFE_CODES = set(), set()
-
-CALIB_K, CALIB_PAIRS = compute_calibration_k(RISKY_CODES, SAFE_CODES, target_usd=24000.0, beta=0.14, alpha=1.2)
-
-# ---------- Streamlit App ----------
+# =========================
+# Streamlit App
+# =========================
 st.set_page_config(page_title="APOLLO", layout="wide")
 st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour Outcomes (APOLLO)")
 
@@ -574,6 +597,15 @@ st.title("Welcome to the Analysis Platform for Occupational Linkages and Labour 
 st.sidebar.subheader("Switching Cost Parameters")
 beta = st.sidebar.slider("Skill distance scaling (beta)", min_value=0.0, max_value=0.5, value=0.14, step=0.01)
 alpha = st.sidebar.slider("Non-linear exponent (alpha)", min_value=0.5, max_value=3.0, value=1.2, step=0.1)
+
+st.sidebar.subheader("Origin-standardization baseline")
+BASELINE_Q = st.sidebar.slider(
+    "Baseline quantile q (q-quantile distance = z=0)",
+    min_value=0.0,
+    max_value=0.5,
+    value=0.10,
+    step=0.05,
+)
 
 EDU_GAP = st.sidebar.slider(
     "Max education distance allowed (0 = same level only)",
@@ -612,6 +644,27 @@ HIST_UNIT = st.sidebar.radio(
     index=0,
 )
 
+# ---------- Risky/Safe sets & calibration ----------
+RISKY_THRESHOLD = 0.70
+SAFE_THRESHOLD = 0.70
+
+available_nocs = set(similarity_df.index) & set(code_to_wage.keys())
+if code_to_roa:
+    RISKY_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] >= RISKY_THRESHOLD}
+    SAFE_CODES = {noc for noc in available_nocs if code_to_roa.get(noc) is not None and code_to_roa[noc] < SAFE_THRESHOLD}
+else:
+    RISKY_CODES, SAFE_CODES = set(), set()
+
+# Compute calibration k based on current beta/alpha/q (cached)
+CALIB_K, CALIB_PAIRS = compute_calibration_k_cached(
+    tuple(sorted(RISKY_CODES)),
+    tuple(sorted(SAFE_CODES)),
+    target_usd=24000.0,
+    beta=beta,
+    alpha=alpha,
+    q=BASELINE_Q,
+)
+
 with st.sidebar.expander("Calibration status", expanded=False):
     st.markdown(
         f"""
@@ -621,8 +674,8 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Risky→Safe pairs used for k:** {CALIB_PAIRS}
 - **Calibration k (always applied):** {CALIB_K:.3f}
 - **Geo data loaded:** {'Yes' if (jobprov_df is not None and not jobprov_df.empty) else 'No'}
-- **Standardization:** per-origin z-scores
-- **Penalty:** one-sided in z (uses max(z,0); no penalty for below-mean distances)
+- **Standardization:** per-origin quantile-centered z (q = {BASELINE_Q:.2f})
+- **Note:** z is hinged to be nonnegative only for the power term when α is fractional
 """
     )
 
@@ -630,23 +683,28 @@ with st.expander("Methodology"):
     st.markdown(
         """
 - Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
-- Dissimilarity is standardized **within each origin occupation’s distribution of destinations** (per-origin z-scores).  
-- The distance penalty is **one-sided**: only destinations more dissimilar than the origin’s mean (z>0) receive a penalty.  
-- Switching costs are scaled by **(2 + expected education months)** of origin wages and adjusted by distance and training multipliers.  
-- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000**.  
+- Distances are standardized **within each origin occupation’s distribution of destinations**, but centered at an **origin-specific quantile** (baseline).  
+- Switching costs are scaled by **(2 + expected education months)** of origin wages and adjusted by a distance term and training multiplier.  
+- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000** (under current parameters).  
         """
+    )
+    st.latex(
+        r"""
+z_{o\to d}(q)=\frac{dist(o,d)-Q_q(o)}{\sigma_o}
+"""
     )
     st.latex(
         r"""
 \text{SkillCost}
 = k \cdot \left((2 + T_{edu})\,w_o\right)
-  \cdot \left(1 + \beta\,\max(z_{o\to d},0)^{\alpha}\right)
-  \cdot m(\max(z_{o\to d},0))
+  \cdot \left(1 + \beta\,\max(z_{o\to d}(q),0)^{\alpha}\right)
+  \cdot m(\max(z_{o\to d}(q),0))
 """
     )
 
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
 menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+
 
 # ---------- Look up by code ----------
 if menu == "Look up by code":
@@ -660,7 +718,7 @@ if menu == "Look up by code":
 
             st.subheader(f"Most Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-            df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
+            df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha, q=BASELINE_Q))
             df_top["Switching Cost ($)"] = df_top["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
                 lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
@@ -670,7 +728,7 @@ if menu == "Look up by code":
 
             st.subheader(f"Least Similar Occupations for {code} – {code_to_title.get(code,'Unknown')}")
             df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-            df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha))
+            df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(code, x, beta=beta, alpha=alpha, q=BASELINE_Q))
             df_bottom["Switching Cost ($)"] = df_bottom["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
             df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
                 lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
@@ -684,7 +742,7 @@ if menu == "Look up by code":
 
                 decomp_rows = []
                 for dest in shown_codes:
-                    d = switching_cost_components(code, dest, beta=beta, alpha=alpha)
+                    d = switching_cost_components(code, dest, beta=beta, alpha=alpha, q=BASELINE_Q)
                     if d is not None:
                         decomp_rows.append(d)
 
@@ -692,7 +750,8 @@ if menu == "Look up by code":
                     decomp_df = pd.DataFrame(decomp_rows)
                     preferred_cols = [
                         "Origin", "Destination", "Title",
-                        "z_raw", "z_pos (max(z,0))",
+                        "Baseline quantile q",
+                        "z_raw (quantile-centered)", "z_eff (hinged for cost)",
                         "Education months", "Base ((2+edu)×origin wage)",
                         "Distance term", "Training mult", "k (calibration)",
                         "Skill cost", "Geo add", "Total cost",
@@ -705,7 +764,7 @@ if menu == "Look up by code":
                         if c in decomp_df.columns:
                             decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):,.2f}")
 
-                    for c in ["z_raw", "z_pos (max(z,0))", "Distance term", "k (calibration)"]:
+                    for c in ["Baseline quantile q", "z_raw (quantile-centered)", "z_eff (hinged for cost)", "Distance term", "k (calibration)"]:
                         if c in decomp_df.columns:
                             decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.3f}")
 
@@ -726,7 +785,7 @@ if menu == "Look up by code":
             st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
             st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-            costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha)
+            costs_df = compute_switching_costs_from_origin(code, beta=beta, alpha=alpha, q=BASELINE_Q)
             if HIST_UNIT == "Dollars ($)":
                 st.subheader(f"Switching Cost Distribution (Dollars) from {code} – {code_to_title.get(code,'Unknown')}")
                 st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
@@ -756,7 +815,7 @@ elif menu == "Look up by title":
 
         st.subheader(f"Most Similar Occupations for {selected_code} – {selected_title}")
         df_top = pd.DataFrame(top_results, columns=["Code", "Title", "Similarity Score"])
-        df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
+        df_top["_sc_numeric"] = df_top["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha, q=BASELINE_Q))
         df_top["Switching Cost ($)"] = df_top["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
         df_top["Years of origin wages"] = df_top["_sc_numeric"].map(
             lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
@@ -766,7 +825,7 @@ elif menu == "Look up by title":
 
         st.subheader(f"Least Similar Occupations for {selected_code} – {selected_title}")
         df_bottom = pd.DataFrame(bottom_results, columns=["Code", "Title", "Similarity Score"])
-        df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha))
+        df_bottom["_sc_numeric"] = df_bottom["Code"].apply(lambda x: calculate_switching_cost(selected_code, x, beta=beta, alpha=alpha, q=BASELINE_Q))
         df_bottom["Switching Cost ($)"] = df_bottom["_sc_numeric"].map(lambda x: f"{x:,.2f}" if pd.notnull(x) else "N/A")
         df_bottom["Years of origin wages"] = df_bottom["_sc_numeric"].map(
             lambda x: (x / (12.0 * float(w_origin))) if (pd.notnull(x) and w_origin is not None and float(w_origin) > 0) else np.nan
@@ -780,7 +839,7 @@ elif menu == "Look up by title":
 
             decomp_rows = []
             for dest in shown_codes:
-                d = switching_cost_components(selected_code, dest, beta=beta, alpha=alpha)
+                d = switching_cost_components(selected_code, dest, beta=beta, alpha=alpha, q=BASELINE_Q)
                 if d is not None:
                     decomp_rows.append(d)
 
@@ -788,7 +847,8 @@ elif menu == "Look up by title":
                 decomp_df = pd.DataFrame(decomp_rows)
                 preferred_cols = [
                     "Origin", "Destination", "Title",
-                    "z_raw", "z_pos (max(z,0))",
+                    "Baseline quantile q",
+                    "z_raw (quantile-centered)", "z_eff (hinged for cost)",
                     "Education months", "Base ((2+edu)×origin wage)",
                     "Distance term", "Training mult", "k (calibration)",
                     "Skill cost", "Geo add", "Total cost",
@@ -801,7 +861,7 @@ elif menu == "Look up by title":
                     if c in decomp_df.columns:
                         decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):,.2f}")
 
-                for c in ["z_raw", "z_pos (max(z,0))", "Distance term", "k (calibration)"]:
+                for c in ["Baseline quantile q", "z_raw (quantile-centered)", "z_eff (hinged for cost)", "Distance term", "k (calibration)"]:
                     if c in decomp_df.columns:
                         decomp_df[c] = decomp_df[c].map(lambda v: f"{float(v):.3f}")
 
@@ -822,7 +882,7 @@ elif menu == "Look up by title":
         st.caption("Tip: hover on a bar to see which occupations fall in that similarity range.")
         st.altair_chart(similarity_hist_with_titles(all_scores), use_container_width=True)
 
-        costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha)
+        costs_df = compute_switching_costs_from_origin(selected_code, beta=beta, alpha=alpha, q=BASELINE_Q)
         if HIST_UNIT == "Dollars ($)":
             st.subheader(f"Switching Cost Distribution (Dollars) from {selected_code} – {selected_title}")
             st.caption("Tip: hover on a bar to see which occupations fall in that cost range.")
@@ -853,7 +913,7 @@ elif menu == "Compare two jobs":
         result = compare_two_jobs(job1_code, job2_code)
         if result:
             score, rank, total = result
-            cost = calculate_switching_cost(job1_code, job2_code, beta=beta, alpha=alpha)
+            cost = calculate_switching_cost(job1_code, job2_code, beta=beta, alpha=alpha, q=BASELINE_Q)
 
             st.success(
                 f"**Comparison Result:**\n\n"
@@ -887,12 +947,11 @@ elif menu == "Compare two jobs":
                 st.info(msg)
 
                 with st.expander("Switching cost decomposition (details)", expanded=False):
-                    d = switching_cost_components(job1_code, job2_code, beta=beta, alpha=alpha)
+                    d = switching_cost_components(job1_code, job2_code, beta=beta, alpha=alpha, q=BASELINE_Q)
                     if d is None:
                         st.info("No decomposition available (filtered out or missing data).")
                     else:
-                        dd = pd.DataFrame([d])
-                        st.dataframe(dd, use_container_width=True)
+                        st.dataframe(pd.DataFrame([d]), use_container_width=True)
 
             else:
                 st.info(
