@@ -8,7 +8,7 @@ import numpy as np
 # STATIC MODEL SETTINGS (no sliders for education/recert logic)
 # ============================================================
 
-# Per-origin standardization baseline: quantile q means Q_q(o) => z=0 (this one remains a UI slider below)
+# Quantile baseline for origin-standardized distances (UI slider still controls q; this is default)
 BASELINE_Q_DEFAULT = 0.10
 
 # Recertification probability based on group digit mismatch (OPTION 1: max-level mismatch)
@@ -56,13 +56,13 @@ def load_data():
     wages_df["noc"] = wages_df["noc"].astype(str).str.zfill(5).str.strip()
     code_to_wage = dict(zip(wages_df["noc"], wages_df["monthly_wage"]))
 
+    def _norm(series):
+        return series.astype(str).str.zfill(5).str.strip()
+
     # ---- Load automation risk (CSV or XLSX). If file missing/invalid, leave empty dict. ----
     code_to_roa = {}
     roa_csv = os.path.join(base_path, "automation_risk.csv")
     roa_xlsx = os.path.join(base_path, "automation_risk.xlsx")
-
-    def _norm(series):
-        return series.astype(str).str.zfill(5).str.strip()
 
     try:
         df = None
@@ -117,6 +117,58 @@ def load_data():
     except Exception:
         jobprov_df = pd.DataFrame()
 
+    # ---- Load shortage/surplus projections (optional) ----
+    # File name requested: future_shortage.(csv|xlsx)
+    code_to_balance = {}   # positive = shortage, negative = surplus
+    code_to_status = {}    # "shortage" / "surplus" / "balanced"
+
+    ss_csv = os.path.join(base_path, "future_shortage.csv")
+    ss_xlsx = os.path.join(base_path, "future_shortage.xlsx")
+
+    try:
+        ss = None
+        if os.path.exists(ss_csv):
+            ss = pd.read_csv(ss_csv)
+        elif os.path.exists(ss_xlsx):
+            ss = pd.read_excel(ss_xlsx)
+
+        if ss is not None and not ss.empty:
+            ss.columns = ss.columns.astype(str).str.strip().str.lower()
+
+            # expected columns: noc, status, magnitude
+            if {"noc", "status", "magnitude"}.issubset(set(ss.columns)):
+                ss["noc"] = _norm(ss["noc"])
+                ss["status"] = ss["status"].astype(str).str.strip().str.lower()
+                ss["magnitude"] = pd.to_numeric(ss["magnitude"], errors="coerce")
+
+                def _signed_balance(row):
+                    stt = row["status"]
+                    mag = row["magnitude"]
+                    if pd.isna(mag):
+                        return np.nan
+                    if "short" in stt:
+                        return float(mag)
+                    if "surp" in stt:
+                        return -float(mag)
+                    if "bal" in stt or "neutral" in stt:
+                        return 0.0
+                    return np.nan
+
+                ss["_balance"] = ss.apply(_signed_balance, axis=1)
+                ss = ss[pd.notnull(ss["_balance"])]
+
+                code_to_balance = dict(zip(ss["noc"], ss["_balance"]))
+                for k, v in code_to_balance.items():
+                    if float(v) > 0:
+                        code_to_status[k] = "shortage"
+                    elif float(v) < 0:
+                        code_to_status[k] = "surplus"
+                    else:
+                        code_to_status[k] = "balanced"
+    except Exception:
+        code_to_balance = {}
+        code_to_status = {}
+
     # Create mappings
     code_to_title = dict(zip(titles_df["noc"], titles_df["title"]))
     title_to_code = {v.lower(): k for k, v in code_to_title.items()}
@@ -128,6 +180,8 @@ def load_data():
         code_to_wage,
         code_to_roa,
         jobprov_df,
+        code_to_balance,
+        code_to_status,
     )
 
 
@@ -138,6 +192,8 @@ def load_data():
     code_to_wage,
     code_to_roa,
     jobprov_df,
+    code_to_balance,
+    code_to_status,
 ) = load_data()
 
 # ============================================================
@@ -842,7 +898,12 @@ HIST_UNIT = st.sidebar.radio(
 )
 
 n_results = st.sidebar.slider("Number of results to show:", min_value=3, max_value=20, value=5)
-menu = st.sidebar.radio("Choose an option:", ["Look up by code", "Look up by title", "Compare two jobs"])
+menu = st.sidebar.radio("Choose an option:", [
+    "Look up by code",
+    "Look up by title",
+    "Compare two jobs",
+    "Surplus → Shortage pathways",
+])
 
 # ---------- Risky/Safe sets ----------
 RISKY_THRESHOLD = 0.70
@@ -876,6 +937,7 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Standardization:** per-origin quantile-centered z (q = {q:.2f})
 - **IMPORTANT:** k is calibrated using **baseline-only** (2 months, excludes tier-upgrade + recert months)
 - **Recert logic:** same-tier only; ramp(z) with cap (static)
+- **Future shortage data loaded:** {'Yes' if (code_to_balance is not None and len(code_to_balance) > 0) else 'No'}
 """
     )
 
@@ -884,7 +946,7 @@ with st.expander("Methodology"):
         f"""
 - Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
 - Distances are standardized within each origin’s destination distribution and centered at an origin-specific quantile **q = {q:.2f}**.  
-- Tier upgrading months come from your education-tier matrix.  
+- Tier upgrading months come from a fixed education-tier matrix.  
 - **Recertification months (same-tier)** are modeled as:  
   **min(cap, base_months[tier] × P(digit mismatch) × ramp(z_eff))**,  
   where ramp(z) = 0 below z0={RECERT_Z0:.2f} and 1 above z1={RECERT_Z1:.2f}.  
@@ -894,7 +956,7 @@ with st.expander("Methodology"):
     )
 
 # ============================================================
-# ---------- Pages ----------
+# ---------- Utility for payback columns ----------
 # ============================================================
 
 def add_payback_columns(df: pd.DataFrame, origin_code: str, cost_col_numeric: str):
@@ -923,6 +985,81 @@ def add_payback_columns(df: pd.DataFrame, origin_code: str, cost_col_numeric: st
 
     return df.drop(columns=["_w_origin", "_w_dest", "_gap", "_pb"])
 
+
+# ============================================================
+# ---------- Shortage pathways ----------
+# ============================================================
+
+def shortage_transition_table(origin_code: str, beta: float, alpha: float, q: float, top_n: int = 1000):
+    """
+    Returns cheapest transitions from a SURPLUS origin into SHORTAGE destinations.
+    Uses cost model unchanged; filters destinations by balance>0.
+    """
+    if not code_to_balance:
+        return pd.DataFrame()
+
+    origin_code = noc_str(origin_code)
+    if origin_code not in similarity_df.index:
+        return pd.DataFrame()
+
+    origin_bal = code_to_balance.get(origin_code, np.nan)
+
+    w_origin = code_to_wage.get(origin_code)
+    w_origin = float(w_origin) if (w_origin is not None and float(w_origin) > 0) else np.nan
+
+    rows = []
+    for dest in similarity_df.columns:
+        if dest == origin_code:
+            continue
+
+        bal = code_to_balance.get(dest, np.nan)
+        if pd.isna(bal) or float(bal) <= 0:
+            continue  # shortage only
+
+        cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha, q=q)
+        if cost is None or pd.isna(cost):
+            continue
+
+        w_dest = code_to_wage.get(dest)
+        w_dest = float(w_dest) if (w_dest is not None and float(w_dest) > 0) else np.nan
+
+        years = cost / (12.0 * w_origin) if pd.notna(w_origin) and w_origin > 0 else np.nan
+        pb = payback_period_months(cost, w_origin, w_dest) if pd.notna(w_origin) and pd.notna(w_dest) else None
+
+        rows.append({
+            "Origin": origin_code,
+            "Origin title": code_to_title.get(origin_code, "Unknown Title"),
+            "Origin status": code_to_status.get(origin_code, "unknown"),
+            "Origin balance (shortage +)": float(origin_bal) if pd.notna(origin_bal) else np.nan,
+            "Origin wage ($/mo)": float(w_origin) if pd.notna(w_origin) else np.nan,
+
+            "Destination": dest,
+            "Destination title": code_to_title.get(dest, "Unknown Title"),
+            "Destination status": code_to_status.get(dest, "unknown"),
+            "Destination balance (shortage +)": float(bal),
+
+            "Destination wage ($/mo)": float(w_dest) if pd.notna(w_dest) else np.nan,
+            "Wage gap ($/mo)": float(w_dest - w_origin) if pd.notna(w_dest) and pd.notna(w_origin) else np.nan,
+
+            "Switching cost ($)": float(cost),
+            "Years of origin wages": float(years) if pd.notna(years) else np.nan,
+
+            "Payback (months)": float(pb["payback_months"]) if (pb and pb["payback_months"] is not None) else np.nan,
+            "Payback (years)": float(pb["payback_years"]) if (pb and pb["payback_years"] is not None) else np.nan,
+            "Payback status": (pb["status"] if pb else "Payback not available."),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df = df.sort_values(["Switching cost ($)", "Destination balance (shortage +)"], ascending=[True, False])
+    return df.head(int(top_n))
+
+
+# ============================================================
+# ---------- Pages ----------
+# ============================================================
 
 # ---------- Look up by code ----------
 if menu == "Look up by code":
@@ -1154,3 +1291,106 @@ elif menu == "Compare two jobs":
                 )
         else:
             st.error("❌ Could not compare occupations.")
+
+
+# ---------- Surplus → Shortage pathways ----------
+elif menu == "Surplus → Shortage pathways":
+    st.header("Surplus → Shortage pathways")
+    st.caption(
+        "Shows low-cost transitions from surplus occupations into shortage occupations "
+        "(cost model unchanged; this page overlays shortage/surplus projections)."
+    )
+
+    if not code_to_balance:
+        st.warning("No projection file found. Add future_shortage.xlsx (columns: noc, status, magnitude).")
+    else:
+        # Build origin options (surplus only)
+        origins = []
+        for c in similarity_df.index:
+            bal = code_to_balance.get(c)
+            if bal is None or (isinstance(bal, float) and np.isnan(bal)):
+                continue
+            if float(bal) < 0:  # surplus
+                origins.append(c)
+
+        origins = sorted(set(origins))
+        if not origins:
+            st.info("No occupations classified as surplus in the projection data.")
+        else:
+            origin_labels = [f"{c} – {code_to_title.get(c,'Unknown Title')}" for c in origins]
+            origin_item = st.selectbox("Select a surplus origin occupation:", origin_labels)
+
+            origin_code = origin_item.split(" – ")[0]
+            origin_bal = float(code_to_balance.get(origin_code, np.nan))
+            origin_status = code_to_status.get(origin_code, "unknown")
+            w_origin = code_to_wage.get(origin_code)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Origin status", origin_status)
+            c2.metric("Origin magnitude (surplus < 0)", f"{origin_bal:,.2f}" if pd.notna(origin_bal) else "N/A")
+            c3.metric("Origin wage ($/mo)", f"{float(w_origin):,.0f}" if (w_origin is not None and float(w_origin) > 0) else "N/A")
+
+            top_n = st.slider("Number of pathways to show", 5, 100, 25, 5)
+            min_short = st.number_input("Minimum shortage magnitude", value=0.0, min_value=0.0)
+            only_wage_gain = st.checkbox(
+                "Only show shortage destinations with higher wage than origin",
+                value=False
+            )
+
+            df = shortage_transition_table(origin_code, beta=beta, alpha=alpha, q=q, top_n=2000)
+            if df.empty:
+                st.info("No eligible shortage destinations found (may be filtered by education gap or missing data).")
+            else:
+                df = df[df["Destination balance (shortage +)"] >= float(min_short)]
+
+                if only_wage_gain:
+                    df = df[pd.notnull(df["Wage gap ($/mo)"]) & (df["Wage gap ($/mo)"] > 0)]
+
+                df = df.sort_values("Switching cost ($)").head(int(top_n))
+
+                # Pretty formatting for display
+                out = df.copy()
+                out["Destination balance (shortage +)"] = out["Destination balance (shortage +)"].map(lambda v: f"{v:,.2f}")
+                out["Switching cost ($)"] = out["Switching cost ($)"].map(lambda v: f"{v:,.0f}")
+                out["Years of origin wages"] = out["Years of origin wages"].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
+                out["Destination wage ($/mo)"] = out["Destination wage ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
+                out["Wage gap ($/mo)"] = out["Wage gap ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
+                out["Payback (months)"] = out["Payback (months)"].map(lambda v: f"{v:.1f}" if pd.notna(v) else "N/A")
+                out["Payback (years)"] = out["Payback (years)"].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
+
+                st.subheader("Lowest-cost transitions into shortage occupations")
+                st.dataframe(
+                    out[[
+                        "Destination", "Destination title",
+                        "Destination balance (shortage +)",
+                        "Destination wage ($/mo)",
+                        "Wage gap ($/mo)",
+                        "Switching cost ($)",
+                        "Years of origin wages",
+                        "Payback (months)", "Payback (years)",
+                    ]],
+                    use_container_width=True,
+                )
+
+                st.subheader("Cost vs shortage magnitude")
+                chart_df = df.copy()
+
+                scatter = (
+                    alt.Chart(chart_df)
+                    .mark_circle(size=70, opacity=0.7)
+                    .encode(
+                        x=alt.X("Switching cost ($):Q", title="Switching cost ($)"),
+                        y=alt.Y("Destination balance (shortage +):Q", title="Shortage magnitude"),
+                        tooltip=[
+                            "Destination:N",
+                            "Destination title:N",
+                            alt.Tooltip("Switching cost ($):Q", format=",.0f"),
+                            alt.Tooltip("Destination balance (shortage +):Q", format=",.2f"),
+                            alt.Tooltip("Destination wage ($/mo):Q", format=",.0f"),
+                            alt.Tooltip("Wage gap ($/mo):Q", format=",.0f"),
+                            alt.Tooltip("Years of origin wages:Q", format=".2f"),
+                        ],
+                    )
+                    .properties(height=350)
+                )
+                st.altair_chart(scatter, use_container_width=True)
