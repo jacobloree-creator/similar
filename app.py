@@ -243,7 +243,7 @@ def expected_tier_upgrade_months(origin_code: str, dest_code: str) -> float:
 # --- NOC group digits for recertification logic ---
 def group_digits(code: str):
     """
-    You stated: 1st, 3rd, and 4th digit denote group.
+    1st, 3rd, and 4th digit denote group.
     (2nd digit is education tier in your convention.)
     """
     s = noc_str(code)
@@ -299,7 +299,7 @@ def recert_ramp(z_eff: float) -> float:
 def expected_recert_months_same_tier(origin: str, dest: str, z_eff: float) -> float:
     """
     Same-tier only (1->1, 2->2, 3->3, ...):
-      min(CAP, base_months[tier] * P(digit mismatch) * ramp(z_eff))
+      min(CAP, base_months[tier] × P(digit mismatch) × ramp(z_eff))
     """
     eo = get_education_level(origin)
     ed = get_education_level(dest)
@@ -318,7 +318,7 @@ def expected_recert_months_same_tier(origin: str, dest: str, z_eff: float) -> fl
     return float(min(float(RECERT_CAP_MONTHS), max(0.0, m)))
 
 
-# --- Option 1: Per-origin shifted standardization (quantile baseline) ---
+# --- Per-origin quantile-centered standardization ---
 def origin_standardized_z(origin_code: str, dest_code: str, q: float):
     """
     z_q = (d_od - Q_q(o)) / std_o
@@ -330,7 +330,7 @@ def origin_standardized_z(origin_code: str, dest_code: str, q: float):
     if row.empty or dest_code not in row.index:
         return None
 
-    std = float(row.std())  # ddof=1
+    std = float(row.std())
     if std == 0.0 or np.isnan(std):
         return None
 
@@ -340,9 +340,6 @@ def origin_standardized_z(origin_code: str, dest_code: str, q: float):
 
 
 def training_multiplier(z_eff):
-    """
-    One-sided bins, expects z_eff >= 0.
-    """
     z = float(z_eff)
     if z < 0.5:
         return 1.0
@@ -506,7 +503,7 @@ def compute_calibration_k_cached(
             if z_raw is None:
                 continue
 
-            z_eff = max(float(z_raw), 0.0)  # alpha fractional safety
+            z_eff = max(float(z_raw), 0.0)
             base = 2.0 * w_origin
             dist_term = 1 + float(beta) * (z_eff ** float(alpha))
             mult = float(training_multiplier(z_eff))
@@ -671,7 +668,6 @@ def switching_cost_components(origin_code, dest_code, beta=0.14, alpha=1.2, q=0.
 
 
 def compute_switching_costs_from_origin(origin_code, beta, alpha, q):
-    """Returns a dataframe with both $ cost and years-of-origin-wages cost for all allowed destinations."""
     rows = []
     origin_level = get_education_level(origin_code)
     w_origin = code_to_wage.get(origin_code)
@@ -842,6 +838,218 @@ def cost_hist_with_titles(cost_df, value_col, x_title, fmt_start, fmt_end, maxbi
 
 
 # ============================================================
+# Allocation simulation: surplus -> shortage greedy fill
+# ============================================================
+
+def allocate_surplus_to_shortage(
+    origin_code: str,
+    beta: float,
+    alpha: float,
+    q: float,
+    shortages_balance: dict,
+    surplus_amount: float,
+    only_wage_gain: bool = False,
+):
+    """
+    Greedy allocation from ONE surplus origin to shortage destinations by lowest switching cost.
+    Updates shortages_balance in-place (remaining shortage capacity).
+
+    shortages_balance: dict {noc: remaining_shortage (positive)}
+    surplus_amount: number of surplus workers to allocate (positive)
+
+    Returns:
+      flows_df: per-destination flows and weighted totals
+      summary: dict with totals and weighted averages
+    """
+    origin_code = noc_str(origin_code)
+    S = float(surplus_amount)
+
+    w_origin = code_to_wage.get(origin_code)
+    w_origin = float(w_origin) if (w_origin is not None and float(w_origin) > 0) else np.nan
+
+    candidates = []
+    for d, H in shortages_balance.items():
+        if H is None:
+            continue
+        H = float(H)
+        if H <= 0:
+            continue
+
+        w_dest = code_to_wage.get(d)
+        w_dest = float(w_dest) if (w_dest is not None and float(w_dest) > 0) else np.nan
+        if only_wage_gain and (pd.isna(w_origin) or pd.isna(w_dest) or w_dest <= w_origin):
+            continue
+
+        cost = calculate_switching_cost(origin_code, d, beta=beta, alpha=alpha, q=q)
+        if cost is None or pd.isna(cost):
+            continue
+
+        candidates.append((d, float(cost), H, w_dest))
+
+    # Sort by lowest cost (closest feasible transitions first)
+    candidates.sort(key=lambda x: x[1])
+
+    rows = []
+    total_moved = 0.0
+    total_cost = 0.0
+    total_dest_wage = 0.0
+    total_origin_wage = 0.0
+
+    for d, cost, H, w_dest in candidates:
+        if S <= 0:
+            break
+
+        x = min(S, H)
+        if x <= 0:
+            continue
+
+        S -= x
+        shortages_balance[d] = H - x
+
+        total_moved += x
+        total_cost += x * cost
+        if pd.notna(w_dest):
+            total_dest_wage += x * w_dest
+        if pd.notna(w_origin):
+            total_origin_wage += x * w_origin
+
+        rows.append({
+            "Origin": origin_code,
+            "Origin title": code_to_title.get(origin_code, "Unknown Title"),
+            "Destination": d,
+            "Destination title": code_to_title.get(d, "Unknown Title"),
+            "Shortage magnitude (dest)": float(code_to_balance.get(d, np.nan)),
+            "Flow moved": x,
+            "Switching cost per worker ($)": cost,
+            "Flow-weighted switching cost ($)": x * cost,
+            "Origin wage ($/mo)": w_origin,
+            "Destination wage ($/mo)": w_dest,
+            "Wage gap ($/mo)": (w_dest - w_origin) if (pd.notna(w_dest) and pd.notna(w_origin)) else np.nan,
+        })
+
+    flows_df = pd.DataFrame(rows)
+
+    avg_cost = (total_cost / total_moved) if total_moved > 0 else np.nan
+    avg_dest_wage = (total_dest_wage / total_moved) if total_moved > 0 else np.nan
+    avg_origin_wage = (total_origin_wage / total_moved) if total_moved > 0 else np.nan
+
+    summary = {
+        "origin": origin_code,
+        "origin_title": code_to_title.get(origin_code, "Unknown Title"),
+        "surplus_input": float(surplus_amount),
+        "moved_total": float(total_moved),
+        "unallocated_surplus": float(S),
+        "total_switching_cost": float(total_cost),
+        "avg_switching_cost_per_worker": float(avg_cost) if pd.notna(avg_cost) else np.nan,
+        "avg_origin_wage": float(avg_origin_wage) if pd.notna(avg_origin_wage) else np.nan,
+        "avg_destination_wage": float(avg_dest_wage) if pd.notna(avg_dest_wage) else np.nan,
+        "avg_wage_change": float(avg_dest_wage - avg_origin_wage) if (pd.notna(avg_dest_wage) and pd.notna(avg_origin_wage)) else np.nan,
+    }
+
+    return flows_df, summary
+
+
+def simulate_all_surplus_to_shortage(
+    beta: float,
+    alpha: float,
+    q: float,
+    only_wage_gain: bool = False,
+    origin_order: str = "Largest surplus first",
+):
+    """
+    Greedy-by-origin simulation across all surplus occupations.
+    Updates a shared shortage balance dict as each origin is allocated.
+    NOTE: Order matters (this is greedy, not global optimization).
+    """
+    if not code_to_balance:
+        return pd.DataFrame(), {}, pd.DataFrame()
+
+    # Remaining shortage capacity (positive)
+    shortages_balance = {
+        noc: float(bal)
+        for noc, bal in code_to_balance.items()
+        if bal is not None and not (isinstance(bal, float) and np.isnan(bal)) and float(bal) > 0
+    }
+
+    surplus_items = []
+    for noc, bal in code_to_balance.items():
+        if bal is None or (isinstance(bal, float) and np.isnan(bal)):
+            continue
+        if float(bal) < 0:
+            surplus_items.append((noc, abs(float(bal))))
+
+    if not surplus_items or not shortages_balance:
+        return pd.DataFrame(), {}, pd.DataFrame()
+
+    if origin_order == "Largest surplus first":
+        surplus_items.sort(key=lambda x: x[1], reverse=True)
+    else:
+        surplus_items.sort(key=lambda x: x[1], reverse=False)
+
+    all_flows = []
+    origin_summaries = []
+
+    total_moved = 0.0
+    total_cost = 0.0
+    total_dest_wage = 0.0
+    total_origin_wage = 0.0
+
+    for origin_code, surplus_amount in surplus_items:
+        if sum(shortages_balance.values()) <= 0:
+            break
+
+        flows_df, summary = allocate_surplus_to_shortage(
+            origin_code=origin_code,
+            beta=beta,
+            alpha=alpha,
+            q=q,
+            shortages_balance=shortages_balance,
+            surplus_amount=surplus_amount,
+            only_wage_gain=only_wage_gain,
+        )
+
+        origin_summaries.append(summary)
+
+        if not flows_df.empty:
+            all_flows.append(flows_df)
+
+            total_moved += float(flows_df["Flow moved"].sum())
+            total_cost += float(flows_df["Flow-weighted switching cost ($)"].sum())
+
+            # wages
+            wdest = flows_df["Destination wage ($/mo)"]
+            worig = flows_df["Origin wage ($/mo)"]
+            flow = flows_df["Flow moved"]
+
+            total_dest_wage += float((wdest * flow).dropna().sum())
+            total_origin_wage += float((worig * flow).dropna().sum())
+
+    flows_all = pd.concat(all_flows, ignore_index=True) if all_flows else pd.DataFrame()
+    origin_summary_df = pd.DataFrame(origin_summaries)
+
+    avg_cost = (total_cost / total_moved) if total_moved > 0 else np.nan
+    avg_dest_wage = (total_dest_wage / total_moved) if total_moved > 0 else np.nan
+    avg_origin_wage = (total_origin_wage / total_moved) if total_moved > 0 else np.nan
+
+    totals = {
+        "total_moved": float(total_moved),
+        "total_switching_cost": float(total_cost),
+        "avg_switching_cost_per_worker": float(avg_cost) if pd.notna(avg_cost) else np.nan,
+        "avg_origin_wage": float(avg_origin_wage) if pd.notna(avg_origin_wage) else np.nan,
+        "avg_destination_wage": float(avg_dest_wage) if pd.notna(avg_dest_wage) else np.nan,
+        "avg_wage_change": float(avg_dest_wage - avg_origin_wage) if (pd.notna(avg_dest_wage) and pd.notna(avg_origin_wage)) else np.nan,
+        "shortage_remaining_total": float(sum(shortages_balance.values())) if shortages_balance else 0.0,
+    }
+
+    shortage_remaining_df = pd.DataFrame(
+        [{"Destination": k, "Remaining shortage": v, "Title": code_to_title.get(k, "Unknown Title")}
+         for k, v in shortages_balance.items() if v > 0]
+    ).sort_values("Remaining shortage", ascending=False)
+
+    return flows_all, totals, origin_summary_df, shortage_remaining_df
+
+
+# ============================================================
 # ---------- Streamlit App ----------
 # ============================================================
 
@@ -936,34 +1144,15 @@ with st.sidebar.expander("Calibration status", expanded=False):
 - **Calibration k (applied in all costs):** {CALIB_K:.3f}
 - **Standardization:** per-origin quantile-centered z (q = {q:.2f})
 - **IMPORTANT:** k is calibrated using **baseline-only** (2 months, excludes tier-upgrade + recert months)
-- **Recert logic:** same-tier only; ramp(z) with cap (static)
 - **Future shortage data loaded:** {'Yes' if (code_to_balance is not None and len(code_to_balance) > 0) else 'No'}
 """
     )
 
-with st.expander("Methodology"):
-    st.markdown(
-        f"""
-- Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
-- Distances are standardized within each origin’s destination distribution and centered at an origin-specific quantile **q = {q:.2f}**.  
-- Tier upgrading months come from a fixed education-tier matrix.  
-- **Recertification months (same-tier)** are modeled as:  
-  **min(cap, base_months[tier] × P(digit mismatch) × ramp(z_eff))**,  
-  where ramp(z) = 0 below z0={RECERT_Z0:.2f} and 1 above z1={RECERT_Z1:.2f}.  
-- k is calibrated to match **$24,000** average risky→safe transitions using **2-month baseline only** (no education effects in calibration).  
-- **Wage payback** is computed as: switching_cost / max(destination_wage - origin_wage, 0).  
-        """
-    )
-
 # ============================================================
-# ---------- Utility for payback columns ----------
+# Utility for payback columns (tables)
 # ============================================================
 
 def add_payback_columns(df: pd.DataFrame, origin_code: str, cost_col_numeric: str):
-    """
-    Adds wage/payback columns to a results dataframe.
-    Expects df to have columns: Code, Title, and a numeric switching cost column.
-    """
     w_origin = code_to_wage.get(origin_code)
     w_origin_val = float(w_origin) if (w_origin is not None and float(w_origin) > 0) else np.nan
 
@@ -984,77 +1173,6 @@ def add_payback_columns(df: pd.DataFrame, origin_code: str, cost_col_numeric: st
     df["Payback (years)"] = df["_pb"].map(lambda d: f"{d['payback_years']:.2f}" if (d and d["payback_years"] is not None) else "N/A")
 
     return df.drop(columns=["_w_origin", "_w_dest", "_gap", "_pb"])
-
-
-# ============================================================
-# ---------- Shortage pathways ----------
-# ============================================================
-
-def shortage_transition_table(origin_code: str, beta: float, alpha: float, q: float, top_n: int = 1000):
-    """
-    Returns cheapest transitions from a SURPLUS origin into SHORTAGE destinations.
-    Uses cost model unchanged; filters destinations by balance>0.
-    """
-    if not code_to_balance:
-        return pd.DataFrame()
-
-    origin_code = noc_str(origin_code)
-    if origin_code not in similarity_df.index:
-        return pd.DataFrame()
-
-    origin_bal = code_to_balance.get(origin_code, np.nan)
-
-    w_origin = code_to_wage.get(origin_code)
-    w_origin = float(w_origin) if (w_origin is not None and float(w_origin) > 0) else np.nan
-
-    rows = []
-    for dest in similarity_df.columns:
-        if dest == origin_code:
-            continue
-
-        bal = code_to_balance.get(dest, np.nan)
-        if pd.isna(bal) or float(bal) <= 0:
-            continue  # shortage only
-
-        cost = calculate_switching_cost(origin_code, dest, beta=beta, alpha=alpha, q=q)
-        if cost is None or pd.isna(cost):
-            continue
-
-        w_dest = code_to_wage.get(dest)
-        w_dest = float(w_dest) if (w_dest is not None and float(w_dest) > 0) else np.nan
-
-        years = cost / (12.0 * w_origin) if pd.notna(w_origin) and w_origin > 0 else np.nan
-        pb = payback_period_months(cost, w_origin, w_dest) if pd.notna(w_origin) and pd.notna(w_dest) else None
-
-        rows.append({
-            "Origin": origin_code,
-            "Origin title": code_to_title.get(origin_code, "Unknown Title"),
-            "Origin status": code_to_status.get(origin_code, "unknown"),
-            "Origin balance (shortage +)": float(origin_bal) if pd.notna(origin_bal) else np.nan,
-            "Origin wage ($/mo)": float(w_origin) if pd.notna(w_origin) else np.nan,
-
-            "Destination": dest,
-            "Destination title": code_to_title.get(dest, "Unknown Title"),
-            "Destination status": code_to_status.get(dest, "unknown"),
-            "Destination balance (shortage +)": float(bal),
-
-            "Destination wage ($/mo)": float(w_dest) if pd.notna(w_dest) else np.nan,
-            "Wage gap ($/mo)": float(w_dest - w_origin) if pd.notna(w_dest) and pd.notna(w_origin) else np.nan,
-
-            "Switching cost ($)": float(cost),
-            "Years of origin wages": float(years) if pd.notna(years) else np.nan,
-
-            "Payback (months)": float(pb["payback_months"]) if (pb and pb["payback_months"] is not None) else np.nan,
-            "Payback (years)": float(pb["payback_years"]) if (pb and pb["payback_years"] is not None) else np.nan,
-            "Payback status": (pb["status"] if pb else "Payback not available."),
-        })
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    df = df.sort_values(["Switching cost ($)", "Destination balance (shortage +)"], ascending=[True, False])
-    return df.head(int(top_n))
 
 
 # ============================================================
@@ -1310,7 +1428,7 @@ elif menu == "Surplus → Shortage pathways":
             bal = code_to_balance.get(c)
             if bal is None or (isinstance(bal, float) and np.isnan(bal)):
                 continue
-            if float(bal) < 0:  # surplus
+            if float(bal) < 0:
                 origins.append(c)
 
         origins = sorted(set(origins))
@@ -1330,6 +1448,7 @@ elif menu == "Surplus → Shortage pathways":
             c2.metric("Origin magnitude (surplus < 0)", f"{origin_bal:,.2f}" if pd.notna(origin_bal) else "N/A")
             c3.metric("Origin wage ($/mo)", f"{float(w_origin):,.0f}" if (w_origin is not None and float(w_origin) > 0) else "N/A")
 
+            st.subheader("A) Cheapest shortage destinations (static overlay)")
             top_n = st.slider("Number of pathways to show", 5, 100, 25, 5)
             min_short = st.number_input("Minimum shortage magnitude", value=0.0, min_value=0.0)
             only_wage_gain = st.checkbox(
@@ -1337,28 +1456,58 @@ elif menu == "Surplus → Shortage pathways":
                 value=False
             )
 
-            df = shortage_transition_table(origin_code, beta=beta, alpha=alpha, q=q, top_n=2000)
-            if df.empty:
-                st.info("No eligible shortage destinations found (may be filtered by education gap or missing data).")
-            else:
-                df = df[df["Destination balance (shortage +)"] >= float(min_short)]
+            # static cheapest destinations table (reuse allocation candidates logic in a simpler way)
+            df = shortage_transition_table(origin_code, beta=beta, alpha=alpha, q=q, top_n=2000) if 'shortage_transition_table' in globals() else pd.DataFrame()
+            # In case earlier versions didn't include shortage_transition_table, compute it directly:
+            if df is None or df.empty:
+                # Build minimal table from all shortage destinations
+                shortages_balance_tmp = {
+                    noc: float(bal) for noc, bal in code_to_balance.items()
+                    if bal is not None and not (isinstance(bal, float) and np.isnan(bal)) and float(bal) > 0
+                }
+                flows_tmp, _ = allocate_surplus_to_shortage(
+                    origin_code=origin_code,
+                    beta=beta,
+                    alpha=alpha,
+                    q=q,
+                    shortages_balance=shortages_balance_tmp,
+                    surplus_amount=1e18,  # large to include all, but we will not use shortages depletion here
+                    only_wage_gain=only_wage_gain,
+                )
+                df = flows_tmp.rename(columns={
+                    "Shortage magnitude (dest)": "Destination balance (shortage +)",
+                    "Switching cost per worker ($)": "Switching cost ($)",
+                })
+                df["Destination"] = df["Destination"].astype(str)
+                df = df[["Destination", "Destination title", "Destination balance (shortage +)", "Switching cost ($)", "Destination wage ($/mo)", "Wage gap ($/mo)"]].copy()
+                df["Destination balance (shortage +)"] = df["Destination"].map(lambda d: float(code_to_balance.get(d, np.nan)))
 
-                if only_wage_gain:
+            if not df.empty:
+                # Harmonize and filter
+                if "Destination balance (shortage +)" not in df.columns and "Destination balance (shortage +)" in df.columns:
+                    pass
+                if "Destination balance (shortage +)" in df.columns:
+                    df = df[pd.notnull(df["Destination balance (shortage +)"])]
+                    df = df[df["Destination balance (shortage +)"] >= float(min_short)]
+                if only_wage_gain and "Wage gap ($/mo)" in df.columns:
                     df = df[pd.notnull(df["Wage gap ($/mo)"]) & (df["Wage gap ($/mo)"] > 0)]
+
+                # Ensure correct column names
+                if "Switching cost ($)" not in df.columns and "Switching cost per worker ($)" in df.columns:
+                    df["Switching cost ($)"] = df["Switching cost per worker ($)"]
 
                 df = df.sort_values("Switching cost ($)").head(int(top_n))
 
-                # Pretty formatting for display
                 out = df.copy()
-                out["Destination balance (shortage +)"] = out["Destination balance (shortage +)"].map(lambda v: f"{v:,.2f}")
-                out["Switching cost ($)"] = out["Switching cost ($)"].map(lambda v: f"{v:,.0f}")
-                out["Years of origin wages"] = out["Years of origin wages"].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
-                out["Destination wage ($/mo)"] = out["Destination wage ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
-                out["Wage gap ($/mo)"] = out["Wage gap ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
-                out["Payback (months)"] = out["Payback (months)"].map(lambda v: f"{v:.1f}" if pd.notna(v) else "N/A")
-                out["Payback (years)"] = out["Payback (years)"].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
+                if "Destination balance (shortage +)" in out.columns:
+                    out["Destination balance (shortage +)"] = out["Destination balance (shortage +)"].map(lambda v: f"{float(v):,.2f}" if pd.notna(v) else "N/A")
+                if "Switching cost ($)" in out.columns:
+                    out["Switching cost ($)"] = out["Switching cost ($)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
+                if "Destination wage ($/mo)" in out.columns:
+                    out["Destination wage ($/mo)"] = out["Destination wage ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
+                if "Wage gap ($/mo)" in out.columns:
+                    out["Wage gap ($/mo)"] = out["Wage gap ($/mo)"].map(lambda v: f"{float(v):,.0f}" if pd.notna(v) else "N/A")
 
-                st.subheader("Lowest-cost transitions into shortage occupations")
                 st.dataframe(
                     out[[
                         "Destination", "Destination title",
@@ -1366,31 +1515,126 @@ elif menu == "Surplus → Shortage pathways":
                         "Destination wage ($/mo)",
                         "Wage gap ($/mo)",
                         "Switching cost ($)",
-                        "Years of origin wages",
-                        "Payback (months)", "Payback (years)",
                     ]],
                     use_container_width=True,
                 )
+            else:
+                st.info("No eligible shortage destinations found (may be filtered by education gap or missing wage data).")
 
-                st.subheader("Cost vs shortage magnitude")
-                chart_df = df.copy()
+            st.divider()
+            st.subheader("B) Simulation: allocate ALL surplus from this origin to shortage occupations")
 
-                scatter = (
-                    alt.Chart(chart_df)
-                    .mark_circle(size=70, opacity=0.7)
-                    .encode(
-                        x=alt.X("Switching cost ($):Q", title="Switching cost ($)"),
-                        y=alt.Y("Destination balance (shortage +):Q", title="Shortage magnitude"),
-                        tooltip=[
-                            "Destination:N",
-                            "Destination title:N",
-                            alt.Tooltip("Switching cost ($):Q", format=",.0f"),
-                            alt.Tooltip("Destination balance (shortage +):Q", format=",.2f"),
-                            alt.Tooltip("Destination wage ($/mo):Q", format=",.0f"),
-                            alt.Tooltip("Wage gap ($/mo):Q", format=",.0f"),
-                            alt.Tooltip("Years of origin wages:Q", format=".2f"),
-                        ],
-                    )
-                    .properties(height=350)
+            sim_only_wage_gain = st.checkbox(
+                "Simulation: require destination wage > origin wage",
+                value=only_wage_gain,
+                key="sim_only_wage_gain_origin",
+            )
+
+            if st.button("Run origin allocation simulation"):
+                shortages_balance = {
+                    noc: float(bal)
+                    for noc, bal in code_to_balance.items()
+                    if bal is not None and not (isinstance(bal, float) and np.isnan(bal)) and float(bal) > 0
+                }
+                surplus_amount = abs(float(code_to_balance.get(origin_code, 0.0)))
+
+                flows_df, summary = allocate_surplus_to_shortage(
+                    origin_code=origin_code,
+                    beta=beta,
+                    alpha=alpha,
+                    q=q,
+                    shortages_balance=shortages_balance,
+                    surplus_amount=surplus_amount,
+                    only_wage_gain=sim_only_wage_gain,
                 )
-                st.altair_chart(scatter, use_container_width=True)
+
+                if summary["moved_total"] <= 0:
+                    st.warning("No allocation was possible (check education gap filter, wage filter, or missing wage data).")
+                else:
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Moved (total)", f"{summary['moved_total']:,.0f}")
+                    m2.metric("Unallocated surplus", f"{summary['unallocated_surplus']:,.0f}")
+                    m3.metric("Total switching cost", f"${summary['total_switching_cost']:,.0f}")
+                    m4.metric("Avg cost per moved worker", f"${summary['avg_switching_cost_per_worker']:,.0f}")
+
+                    n1, n2, n3 = st.columns(3)
+                    n1.metric("Avg origin wage ($/mo)", f"${summary['avg_origin_wage']:,.0f}" if pd.notna(summary["avg_origin_wage"]) else "N/A")
+                    n2.metric("Avg new wage ($/mo)", f"${summary['avg_destination_wage']:,.0f}" if pd.notna(summary["avg_destination_wage"]) else "N/A")
+                    n3.metric("Avg wage change ($/mo)", f"${summary['avg_wage_change']:,.0f}" if pd.notna(summary["avg_wage_change"]) else "N/A")
+
+                    st.subheader("Allocation results (origin → multiple destinations)")
+                    st.dataframe(flows_df, use_container_width=True)
+
+                    # Bar chart: flows by destination
+                    bar_df = flows_df.copy()
+                    bar_df["label"] = bar_df["Destination"] + " – " + bar_df["Destination title"]
+                    bar = (
+                        alt.Chart(bar_df)
+                        .mark_bar()
+                        .encode(
+                            y=alt.Y("label:N", sort="-x", title="Destination"),
+                            x=alt.X("Flow moved:Q", title="Flow moved (weighted workers)"),
+                            tooltip=[
+                                "Destination:N",
+                                "Destination title:N",
+                                alt.Tooltip("Flow moved:Q", format=",.0f"),
+                                alt.Tooltip("Switching cost per worker ($):Q", format=",.0f"),
+                                alt.Tooltip("Flow-weighted switching cost ($):Q", format=",.0f"),
+                                alt.Tooltip("Destination wage ($/mo):Q", format=",.0f"),
+                            ],
+                        )
+                        .properties(height=min(900, 30 * max(5, len(bar_df))))
+                    )
+                    st.altair_chart(bar, use_container_width=True)
+
+            st.divider()
+            st.subheader("C) Simulation: allocate across ALL surplus occupations (greedy-by-origin)")
+
+            st.caption(
+                "This is a greedy simulation (not a global optimizer). "
+                "Order matters: earlier origins consume shortage capacity first."
+            )
+
+            origin_order = st.radio(
+                "Order of surplus origins",
+                options=["Largest surplus first", "Smallest surplus first"],
+                index=0,
+                horizontal=True,
+            )
+            sim_only_wage_gain_all = st.checkbox(
+                "Require destination wage > origin wage (all-origins simulation)",
+                value=False,
+                key="sim_only_wage_gain_all",
+            )
+
+            if st.button("Run full system simulation"):
+                flows_all, totals, origin_summary_df, shortage_remaining_df = simulate_all_surplus_to_shortage(
+                    beta=beta,
+                    alpha=alpha,
+                    q=q,
+                    only_wage_gain=sim_only_wage_gain_all,
+                    origin_order=origin_order,
+                )
+
+                if totals.get("total_moved", 0.0) <= 0:
+                    st.warning("No allocation was possible. Check missing wage data, education gap, or wage filter.")
+                else:
+                    t1, t2, t3, t4 = st.columns(4)
+                    t1.metric("Total moved", f"{totals['total_moved']:,.0f}")
+                    t2.metric("Total switching cost", f"${totals['total_switching_cost']:,.0f}")
+                    t3.metric("Avg cost per moved worker", f"${totals['avg_switching_cost_per_worker']:,.0f}")
+                    t4.metric("Shortage remaining (total)", f"{totals['shortage_remaining_total']:,.0f}")
+
+                    u1, u2, u3 = st.columns(3)
+                    u1.metric("Avg origin wage ($/mo)", f"${totals['avg_origin_wage']:,.0f}" if pd.notna(totals["avg_origin_wage"]) else "N/A")
+                    u2.metric("Avg new wage ($/mo)", f"${totals['avg_destination_wage']:,.0f}" if pd.notna(totals["avg_destination_wage"]) else "N/A")
+                    u3.metric("Avg wage change ($/mo)", f"${totals['avg_wage_change']:,.0f}" if pd.notna(totals["avg_wage_change"]) else "N/A")
+
+                    st.subheader("Flows (all origins)")
+                    st.dataframe(flows_all, use_container_width=True)
+
+                    st.subheader("Origin summaries")
+                    st.dataframe(origin_summary_df, use_container_width=True)
+
+                    st.subheader("Remaining shortage after simulation")
+                    st.dataframe(shortage_remaining_df, use_container_width=True)
