@@ -1667,11 +1667,16 @@ elif menu == "Surplus → Shortage pathways":
                     only_wage_gain=sim_only_wage_gain_all,
                     origin_order=origin_order,
                 )
-            system_med_reskill = np.nan
-            if flows_all is not None and not flows_all.empty and "Reskilling months (expected)" in flows_all.columns:
-                system_med_reskill = weighted_median(
-                    flows_all["Reskilling months (expected)"].values,
-                    flows_all["Flow moved"].values,
+
+                system_med_reskill = np.nan
+                if (
+                    flows_all is not None
+                    and not flows_all.empty
+                    and "Reskilling months (expected)" in flows_all.columns
+                ):
+                    system_med_reskill = weighted_median(
+                        flows_all["Reskilling months (expected)"].values,
+                        flows_all["Flow moved"].values,
                 )
 
                 if totals.get("total_moved", 0.0) <= 0:
