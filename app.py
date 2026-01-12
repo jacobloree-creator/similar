@@ -317,6 +317,29 @@ def expected_recert_months_same_tier(origin: str, dest: str, z_eff: float) -> fl
     m = base_months * p * r
     return float(min(float(RECERT_CAP_MONTHS), max(0.0, m)))
 
+def weighted_median(values, weights):
+    """
+    Weighted median of `values` with nonnegative `weights`.
+    Returns the smallest value where cumulative weight >= 50% of total weight.
+    """
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+
+    m = np.isfinite(v) & np.isfinite(w) & (w > 0)
+    if not np.any(m):
+        return np.nan
+
+    v = v[m]
+    w = w[m]
+
+    order = np.argsort(v)
+    v = v[order]
+    w = w[order]
+
+    cumw = np.cumsum(w)
+    cutoff = 0.5 * np.sum(w)
+    idx = np.searchsorted(cumw, cutoff, side="left")
+    return float(v[min(idx, len(v) - 1)])
 
 # --- Per-origin quantile-centered standardization ---
 def origin_standardized_z(origin_code: str, dest_code: str, q: float):
@@ -854,12 +877,9 @@ def allocate_surplus_to_shortage(
     Greedy allocation from ONE surplus origin to shortage destinations by lowest switching cost.
     Updates shortages_balance in-place (remaining shortage capacity).
 
-    shortages_balance: dict {noc: remaining_shortage (positive)}
-    surplus_amount: number of surplus workers to allocate (positive)
-
-    Returns:
-      flows_df: per-destination flows and weighted totals
-      summary: dict with totals and weighted averages
+    Adds:
+      - Reskilling months (expected) per flow
+      - Median reskilling months among moved workers (flow-weighted median)
     """
     origin_code = noc_str(origin_code)
     S = float(surplus_amount)
@@ -886,7 +906,6 @@ def allocate_surplus_to_shortage(
 
         candidates.append((d, float(cost), H, w_dest))
 
-    # Sort by lowest cost (closest feasible transitions first)
     candidates.sort(key=lambda x: x[1])
 
     rows = []
@@ -903,9 +922,18 @@ def allocate_surplus_to_shortage(
         if x <= 0:
             continue
 
+        # ---- Expected reskilling months for this origin->dest ----
+        tier_months = float(expected_tier_upgrade_months(origin_code, d))
+        z_raw = origin_standardized_z(origin_code, d, q=q)
+        z_eff = max(float(z_raw), 0.0) if (z_raw is not None and not np.isnan(z_raw)) else 0.0
+        recert_months = float(expected_recert_months_same_tier(origin_code, d, z_eff))
+        reskill_months = float(tier_months + recert_months)
+
+        # ---- Update balances ----
         S -= x
         shortages_balance[d] = H - x
 
+        # ---- Totals ----
         total_moved += x
         total_cost += x * cost
         if pd.notna(w_dest):
@@ -919,12 +947,19 @@ def allocate_surplus_to_shortage(
             "Destination": d,
             "Destination title": code_to_title.get(d, "Unknown Title"),
             "Shortage magnitude (dest)": float(code_to_balance.get(d, np.nan)),
+
             "Flow moved": x,
+
             "Switching cost per worker ($)": cost,
             "Flow-weighted switching cost ($)": x * cost,
+
             "Origin wage ($/mo)": w_origin,
             "Destination wage ($/mo)": w_dest,
             "Wage gap ($/mo)": (w_dest - w_origin) if (pd.notna(w_dest) and pd.notna(w_origin)) else np.nan,
+
+            "Tier upgrade months": tier_months,
+            "Recert months (expected)": recert_months,
+            "Reskilling months (expected)": reskill_months,
         })
 
     flows_df = pd.DataFrame(rows)
@@ -933,17 +968,29 @@ def allocate_surplus_to_shortage(
     avg_dest_wage = (total_dest_wage / total_moved) if total_moved > 0 else np.nan
     avg_origin_wage = (total_origin_wage / total_moved) if total_moved > 0 else np.nan
 
+    # ---- Flow-weighted median reskilling months ----
+    med_reskill = np.nan
+    if not flows_df.empty and "Reskilling months (expected)" in flows_df.columns:
+        med_reskill = weighted_median(
+            flows_df["Reskilling months (expected)"].values,
+            flows_df["Flow moved"].values,
+        )
+
     summary = {
         "origin": origin_code,
         "origin_title": code_to_title.get(origin_code, "Unknown Title"),
         "surplus_input": float(surplus_amount),
         "moved_total": float(total_moved),
         "unallocated_surplus": float(S),
+
         "total_switching_cost": float(total_cost),
         "avg_switching_cost_per_worker": float(avg_cost) if pd.notna(avg_cost) else np.nan,
+
         "avg_origin_wage": float(avg_origin_wage) if pd.notna(avg_origin_wage) else np.nan,
         "avg_destination_wage": float(avg_dest_wage) if pd.notna(avg_dest_wage) else np.nan,
         "avg_wage_change": float(avg_dest_wage - avg_origin_wage) if (pd.notna(avg_dest_wage) and pd.notna(avg_origin_wage)) else np.nan,
+
+        "median_reskilling_months": float(med_reskill) if pd.notna(med_reskill) else np.nan,
     }
 
     return flows_df, summary
@@ -1551,11 +1598,16 @@ elif menu == "Surplus → Shortage pathways":
                 if summary["moved_total"] <= 0:
                     st.warning("No allocation was possible (check education gap filter, wage filter, or missing wage data).")
                 else:
-                    m1, m2, m3, m4 = st.columns(4)
+                    m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("Moved (total)", f"{summary['moved_total']:,.0f}")
                     m2.metric("Unallocated surplus", f"{summary['unallocated_surplus']:,.0f}")
                     m3.metric("Total switching cost", f"${summary['total_switching_cost']:,.0f}")
                     m4.metric("Avg cost per moved worker", f"${summary['avg_switching_cost_per_worker']:,.0f}")
+                    m5.metric(
+                    "Median reskilling months",
+                    f"{summary['median_reskilling_months']:.1f}" if pd.notna(summary["median_reskilling_months"]) else "N/A"
+                    )
+
 
                     n1, n2, n3 = st.columns(3)
                     n1.metric("Avg origin wage ($/mo)", f"${summary['avg_origin_wage']:,.0f}" if pd.notna(summary["avg_origin_wage"]) else "N/A")
@@ -1615,15 +1667,26 @@ elif menu == "Surplus → Shortage pathways":
                     only_wage_gain=sim_only_wage_gain_all,
                     origin_order=origin_order,
                 )
+            system_med_reskill = np.nan
+            if flows_all is not None and not flows_all.empty and "Reskilling months (expected)" in flows_all.columns:
+                system_med_reskill = weighted_median(
+                    flows_all["Reskilling months (expected)"].values,
+                    flows_all["Flow moved"].values,
+                )
 
                 if totals.get("total_moved", 0.0) <= 0:
                     st.warning("No allocation was possible. Check missing wage data, education gap, or wage filter.")
                 else:
-                    t1, t2, t3, t4 = st.columns(4)
+                    t1, t2, t3, t4, t5 = st.columns(5)
                     t1.metric("Total moved", f"{totals['total_moved']:,.0f}")
                     t2.metric("Total switching cost", f"${totals['total_switching_cost']:,.0f}")
                     t3.metric("Avg cost per moved worker", f"${totals['avg_switching_cost_per_worker']:,.0f}")
                     t4.metric("Shortage remaining (total)", f"{totals['shortage_remaining_total']:,.0f}")
+                    t5.metric(
+                    "Median reskilling months",
+                    f"{system_med_reskill:.1f}" if pd.notna(system_med_reskill) else "N/A"
+                    )
+
 
                     u1, u2, u3 = st.columns(3)
                     u1.metric("Avg origin wage ($/mo)", f"${totals['avg_origin_wage']:,.0f}" if pd.notna(totals["avg_origin_wage"]) else "N/A")
