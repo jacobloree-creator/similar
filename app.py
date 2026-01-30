@@ -1167,12 +1167,112 @@ with st.sidebar.expander("Calibration status", expanded=False):
 with st.expander("Methodology"):
     st.markdown(
         """
-- Similarity scores are Euclidean distances of O*NET skill/ability/knowledge vectors (smaller = more similar).  
-- Dissimilarity is standardized **within each origin occupation’s distribution of destinations** using a **quantile-centered** z-score: baseline is the origin’s **q-th quantile** distance (not the mean).  
-- The cost penalty uses **hinged** distances: only destinations above the baseline (z>0) receive distance/training penalties.  
-- “Months until prepared” in the model is the **additive months term**:  
-  **2 (baseline) + tier upgrade months + expected recert months** (same-tier only, probability × ramp × cap).  
-- A global calibration factor **k** is chosen so that average **risky → safe** transitions are about **$24,000** (calibrated on baseline-only, prior to adding education/recert months).  
+### Overview
+This app estimates the **cost of transitioning workers between occupations** by combining information on
+skill similarity, education requirements, expected credential adjustment, wages, geography, and projected
+labour market imbalances.
+
+The goal is not to predict individual behaviour, but to provide a **transparent, internally consistent
+approximation of transition frictions** that can be used for scenario analysis and policy exploration.
+
+---
+
+### Skill similarity
+- Occupations are represented by vectors of skills, abilities, and knowledge derived from O*NET data.
+- Similarity between occupations is measured using **Euclidean distance** in this multidimensional skill space.
+- Smaller distances indicate more similar skill requirements.
+
+---
+
+### Origin-specific standardization
+- Raw skill distances are standardized **within each origin occupation’s distribution of destinations**.
+- Distances are centered at an **origin-specific baseline** defined by the *q-th quantile* of that distribution
+  (rather than the mean).
+- This avoids implying that roughly half of all possible transitions are “easier than average,” while still
+  preserving a standard deviation of one within each origin.
+- A standardized distance of \(z=0\) indicates **no additional skill-distance penalty**, not zero cost.
+
+---
+
+### Switching cost structure
+The switching cost from origin occupation \(o\) to destination \(d\) is modeled as:
+
+\[
+\text{Cost}_{o\to d}
+= k \cdot \left( M_{o\to d} \cdot w_o \right)
+\cdot \left( 1 + \beta \, z_{o\to d}^{\alpha} \right)
+\cdot m(z_{o\to d})
+\;+\; \lambda \cdot \text{GeoCost}_d
+\]
+
+where:
+
+- \(w_o\) is the origin occupation’s monthly wage.
+- \(M_{o\to d}\) is the expected **months until prepared** for the destination job.
+- \(z_{o\to d}\) is the origin-specific standardized skill distance (hinged at zero).
+- \(\beta\) and \(\alpha\) control how costs increase with skill dissimilarity.
+- \(m(z)\) is a discrete training-intensity multiplier.
+- \(k\) is a global calibration factor.
+- The geographic term is optional.
+
+---
+
+### Months until prepared
+The additive preparation-time component is:
+
+\[
+M_{o\to d}
+= 2
++ \text{Tier-upgrade months}
++ \text{Expected recertification months}
+\]
+
+- **2 months** represents baseline job search and adjustment time.
+- **Tier-upgrade months** are based on differences in formal education requirements
+  (e.g. high school → college → university).
+- **Recertification months** apply only when the education tier stays the same and reflect
+  the *expected* time needed to re-credential or retrain within a field.
+
+---
+
+### Expected recertification
+- Recertification risk is proxied using differences in **NOC group digits**
+  (first, third, and fourth digits).
+- Larger group differences imply a higher probability that recertification is required.
+- Expected recertification months are:
+  - scaled by this probability,
+  - smoothly ramped up with skill distance,
+  - and capped to prevent extreme values.
+- This captures **field mismatch risk**, not formal licensing requirements per se.
+
+---
+
+### Calibration
+- The global scaling factor \(k\) is calibrated so that the average cost of transitions
+  from **high-automation-risk occupations to lower-risk occupations** is approximately **$24,000**.
+- Calibration is performed **before** adding education or recertification months,
+  using only the 2-month baseline, ensuring comparability across specifications.
+
+---
+
+### Geographic mobility (optional)
+- If enabled, an additional expected relocation cost is added.
+- This cost depends on how geographically concentrated the destination occupation is
+  relative to the worker’s province of origin.
+
+---
+
+### Surplus–shortage simulations
+- When future labour market projections are provided, the app simulates reallocations
+  from surplus occupations to shortage occupations.
+- Workers are assigned using a **greedy, lowest-cost-first heuristic**:
+  surplus workers fill the cheapest available shortage until that shortage is exhausted,
+  then proceed to the next.
+- The simulation reports:
+  - total and average switching costs,
+  - resulting average wages,
+  - and the average months until workers are prepared for their new jobs.
+- Results should be interpreted as **approximate, scenario-based indicators**, not forecasts.
         """
     )
 
