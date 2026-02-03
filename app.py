@@ -3,6 +3,8 @@ import pandas as pd
 import os
 import altair as alt
 import numpy as np
+import io
+import zipfile
 
 # ============================================================
 # STATIC MODEL SETTINGS (no sliders for education/recert logic)
@@ -214,7 +216,23 @@ def get_education_level(noc_code):
     except Exception:
         return None
 
-
+def make_zip_bundle(files: dict) -> bytes:
+    """
+    files: { "filename.csv": dataframe, "notes.txt": str, ... }
+    returns: zipped bytes for st.download_button
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for name, obj in files.items():
+            if obj is None:
+                continue
+            if isinstance(obj, pd.DataFrame):
+                z.writestr(name, obj.to_csv(index=False))
+            else:
+                z.writestr(name, str(obj))
+    buf.seek(0)
+    return buf.getvalue()
+    
 # --- Education-months matrix (tier upgrading only) ---
 EDU_MONTHS_MATRIX = np.array([
     # dest:  1   2   3   4   5
@@ -1573,7 +1591,8 @@ elif menu == "Surplus → Shortage pathways":
             c2.metric("Origin magnitude (surplus < 0)", f"{origin_bal:,.2f}" if pd.notna(origin_bal) else "N/A")
             c3.metric("Origin wage ($/mo)", f"{float(w_origin):,.0f}" if (w_origin is not None and float(w_origin) > 0) else "N/A")
 
-            st.subheader("A) Cheapest shortage destinations")
+            st.subheader("B) Where can these workers go? Cheapest shortage destinations")
+            st.caption("Workers are matched to shortage occupations in order of lowest estimated switching cost.")
             top_n = st.slider("Number of pathways to show", 5, 100, 25, 5)
             min_short = st.number_input("Minimum shortage magnitude", value=0.0, min_value=0.0)
             only_wage_gain = st.checkbox(
@@ -1626,7 +1645,8 @@ elif menu == "Surplus → Shortage pathways":
                 st.info("No eligible shortage destinations found (may be filtered by education gap or missing wage data).")
 
             st.divider()
-            st.subheader("B) Simulation: allocate ALL surplus from this origin to shortage occupations")
+            st.subheader("C) What happens if we reallocate all workers from this surplus occupation?")
+            st.caption("Allocates the full surplus of the selected origin across shortages using a lowest-cost-first heuristic.")
             sim_only_wage_gain = st.checkbox(
                 "Simulation: require destination wage > origin wage",
                 value=only_wage_gain,
@@ -1672,6 +1692,23 @@ elif menu == "Surplus → Shortage pathways":
                     st.subheader("Allocation results (origin → multiple destinations)")
                     st.dataframe(flows_df, use_container_width=True)
 
+                    # ---- Download bundle: origin simulation ----
+                    bundle = make_zip_bundle({
+                        f"origin_{origin_code}_flows.csv": flows_df,
+                        f"origin_{origin_code}_summary.csv": pd.DataFrame([summary]),
+                        "readme.txt": (
+                            "Bundle contents:\n"
+                            "- origin_*_flows.csv: destination-level flows and costs for the selected origin\n"
+                            "- origin_*_summary.csv: totals and averages for the selected origin\n"
+                        ),
+                    })
+                    st.download_button(
+                        label="Download origin simulation bundle (ZIP)",
+                        data=bundle,
+                        file_name=f"origin_{origin_code}_simulation_bundle.zip",
+                        mime="application/zip",
+                    )
+
                     # Bar chart: flows by destination
                     bar_df = flows_df.copy()
                     bar_df["label"] = bar_df["Destination"] + " – " + bar_df["Destination title"]
@@ -1696,7 +1733,8 @@ elif menu == "Surplus → Shortage pathways":
                     st.altair_chart(bar, use_container_width=True)
 
             st.divider()
-            st.subheader("C) Simulation: allocate across ALL surplus occupations (greedy-by-origin)")
+            st.subheader("D) What happens system-wide if we reallocate across all surplus occupations?")
+            st.caption("Runs the same allocation across all surplus origins; ordering matters because shortages are filled as we go.")
             st.caption(
                 "This is a greedy simulation (not a global optimizer). "
                 "Order matters: earlier origins consume shortage capacity first."
@@ -1749,3 +1787,26 @@ elif menu == "Surplus → Shortage pathways":
 
                     st.subheader("Remaining shortage after simulation")
                     st.dataframe(shortage_remaining_df, use_container_width=True)
+
+                # ---- Download bundle: system simulation ----
+                bundle = make_zip_bundle({
+                    "system_flows_all.csv": flows_all,
+                    "system_totals.csv": pd.DataFrame([totals]),
+                    "system_origin_summaries.csv": origin_summary_df,
+                    "system_shortage_remaining.csv": shortage_remaining_df,
+                    "readme.txt": (
+                        "Bundle contents:\n"
+                        "- system_flows_all.csv: all origin->destination flows (greedy allocation)\n"
+                        "- system_totals.csv: aggregate totals and averages\n"
+                        "- system_origin_summaries.csv: per-origin moved/cost/wage/prep-month summaries\n"
+                        "- system_shortage_remaining.csv: shortage capacity remaining after simulation\n"
+                        "Notes:\n"
+                        "- This is a greedy heuristic; ordering of surplus origins affects results.\n"
+                    ),
+                })
+                st.download_button(
+                    label="Download system simulation bundle (ZIP)",
+                    data=bundle,
+                    file_name="system_simulation_bundle.zip",
+                    mime="application/zip",
+                )
